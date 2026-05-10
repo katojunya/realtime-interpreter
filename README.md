@@ -2,7 +2,14 @@
 
 英語音声をマルチモーダル LLM に直接入力して、英語転写 + 日本語訳をリアルタイムにストリーム表示する CLI。
 
-姉妹プロジェクト [`realtime-transcriber`](../realtime-transcriber/) が「Whisper 文字起こし → Ollama 翻訳」の 2 段直列で 7〜15 秒チャンクを処理するのに対し、本ツールは **Whisper を経由せず** Gemma 4 (mlx-vlm) に音声を直接入力し、1 回の推論で **英語転写と日本語訳を同時生成** します。
+**バックエンド切替対応**:
+
+| バックエンド | 実装 | 特徴 |
+|---|---|---|
+| `mlx` (既定) | mlx-vlm + Gemma 4 (ローカル) | オフライン・無料・Apple Silicon ネイティブ |
+| `openai` | OpenAI gpt-realtime-translate (WebSocket) | クラウド・$0.034/分・低レイテンシ・サーバ VAD |
+
+姉妹プロジェクト [`realtime-transcriber`](../realtime-transcriber/) が「Whisper 文字起こし → Ollama 翻訳」の 2 段直列で 7〜15 秒チャンクを処理するのに対し、本ツールは **Whisper を経由せず** Gemma 4 (mlx-vlm) に音声を直接入力し、1 回の推論で **英語転写と日本語訳を同時生成** します。OpenAI バックエンドではサーバ側で同等の処理が走ります。
 
 ## 出力フォーマット
 
@@ -20,9 +27,11 @@ VAD で検出された発話セグメント単位で、確定した結果を 2 �
 
 ## アーキテクチャ
 
+### MLX バックエンド (既定, ローカル)
+
 ```
 BlackHole 2ch
-  → SpeechSegmentCapture (VAD で発話を区切る. 無音 500ms or 最大 15s で finalize)
+  → SpeechSegmentCapture (Silero VAD で発話を区切る. 無音 500ms or 最大 15s で finalize)
   → GemmaAudioTranslator (mlx-vlm + google/gemma-4-e4b-it 4bit)
        1 回の推論で "EN: ... / JA: ..." を生成
   → 確定したセグメント単位で append-only 出力
@@ -33,6 +42,43 @@ BlackHole 2ch
        過去 60 秒の英語転写から日本語要約を生成
   → 要約ブロックを表示 + ログ記録
 ```
+
+### OpenAI バックエンド (クラウド)
+
+```
+BlackHole 2ch
+  → 24kHz PCM16 で WebSocket ストリーム送信
+  → OpenAI gpt-realtime-translate
+       サーバ側で VAD + 転写 + 翻訳 + (TTS) を一括実行
+  → input_transcript.delta (英語) / output_transcript.delta (日本語) を delta 単位で受信
+  → 受信ごとに Rich Live が in-place で「進行中」行を更新表示
+  → 1.5 秒 delta が来なくなったら debounce でターン確定
+  → 確定行を append-only に永続表示 + ログ
+```
+
+**ストリーミング表示 + 発話単位の commit (alignment-first)**: delta が届くたびに英語 + 日本語の 2 行が in-place で伸びていきます (Rich Live)。**delta が一定時間 (既定 2.5 秒) 来なくなった時点でその発話を確定** として上に積み上げ、次の発話を新しい in-progress 行として表示します。
+
+文単位 (JA `。` / EN `.`) でリアルタイム commit する設計も試したが、本モデルは **EN 1 文を JA 複数文 (例: 挨拶を独立文として切る) で訳す** ことがあり、文単位 commit を行うと EN1 ↔ JA1 だけがペアになって後続がズレるため、現状は debounce ベースに統一している。
+
+`--openai-debounce-seconds` で発話の切れ目検出感度を調整できます (既定 2.5):
+
+| 値 | トレードオフ |
+|---|---|
+| 1.0〜1.5 | commit 間隔短い. ただし翻訳途中で commit して EN/JA がズレる可能性あり |
+| 2.5 (既定) | バランス. 通常の発話間ポーズで commit |
+| 4.0〜5.0 | より長い文・段落単位で commit. 確実に対応が取れるが表示は遅延する |
+
+`--openai-max-segment-seconds` で **連続発話時の強制 commit 上限** を設定できます (既定 15.0). ポーズなしの長台詞でも N 秒で 1 チャンクに切り分けます:
+
+| 値 | 効果 |
+|---|---|
+| `15` (既定) | 連続発話でも約 15 秒で強制カット. 巨大ブロック化を防止 |
+| `30` | 段落単位の長文を許容 |
+| `0` | 強制カット無効. debounce のみで判定 (連続発話で巨大化する可能性) |
+
+強制 commit 時は EN/JA に若干ズレが生じる可能性がありますが、文単位の即時 commit と比べると軽症です。
+
+要約機能はローカル Gemma 4 を必要とするため、OpenAI バックエンド単体では無効です (`--summary-interval-seconds 0` 推奨)。
 
 ## 必要なディスク容量
 
@@ -56,27 +102,43 @@ uv sync
 
 ## 使い方
 
+### MLX バックエンド (既定)
+
 ```bash
 uv run realtime-interpreter
+# = uv run realtime-interpreter --backend mlx
 ```
+
+### OpenAI バックエンド
+
+```bash
+export OPENAI_API_KEY=sk-...
+uv run realtime-interpreter --backend openai
+```
+
+OpenAI バックエンドは **WebSocket ベースのストリーミング** で、サーバ側 VAD によって自動的に発話の切れ目が検出されます。要約機能を使いたい場合は `--backend mlx` を選択してください (要約は Gemma 4 をローカルで再利用するため)。
 
 出力デバイスが Multi-Output Device になっていない場合、起動時に切替を促します。
 終了は `Ctrl+C`。
 
 ### オプション
 
-| フラグ | 説明 | 既定 |
-|---|---|---|
-| `--device` | 入力デバイス名 | `BlackHole 2ch` |
-| `--model` | モデルエイリアス or 完全な HuggingFace ID | `e4b` |
-| `--list-models` | プリセット一覧を表示して終了 | — |
-| `--end-silence-ms` | この長さの無音で発話セグメントを区切る. 小さくすると刻みが細かくなる | `500` |
-| `--max-segment-seconds` | 連続発話時のセグメント最大長 (秒). 小さくすると長い発話も強制的に細切れになる | `15.0` |
-| `--summary-interval-seconds` | N 秒ごとに過去 N 秒分の英文を日本語要約. `0` で無効 | `60` |
-| `--log-dir` | セッションログの出力先 | `logs/` |
-| `--debug` | 詳細ログを stderr に出す | (off) |
+| フラグ | 説明 | 既定 | 対象 |
+|---|---|---|---|
+| `--backend` | `mlx` or `openai` | `mlx` | 共通 |
+| `--device` | 入力デバイス名 | `BlackHole 2ch` | 共通 |
+| `--summary-interval-seconds` | N 秒ごとに過去 N 秒分の英文を日本語要約. `0` で無効 | `60` | mlx のみ |
+| `--log-dir` | セッションログの出力先 | `logs/` | 共通 |
+| `--debug` | 詳細ログを stderr に出す | (off) | 共通 |
+| `--model` | モデルエイリアス or 完全な HuggingFace ID | `e4b` | mlx |
+| `--list-models` | プリセット一覧を表示して終了 | — | mlx |
+| `--end-silence-ms` | この長さの無音で発話セグメントを区切る | `500` | mlx |
+| `--max-segment-seconds` | 連続発話時のセグメント最大長 (秒) | `15.0` | mlx |
+| `--openai-model` | Realtime モデル ID | `gpt-realtime-translate` | openai |
 
-環境変数 `REALTIME_INTERPRETER_MODEL` でデフォルトモデルを上書きできます (エイリアスでも完全 ID でも可)。
+環境変数:
+- `REALTIME_INTERPRETER_MODEL`: MLX デフォルトモデルの上書き (エイリアスでも完全 ID でも可)
+- `OPENAI_API_KEY`: OpenAI バックエンド使用時に必須
 
 ### モデルの切り替え
 
@@ -200,13 +262,32 @@ uv run pytest
 
 実機での体感レイテンシは「発話終了 (無音 500ms 検知) + 推論 (発話長に応じて 0.5〜2 秒)」で、目安として **発話終了から 1〜3 秒で画面に表示** されます。
 
+## 料金の目安
+
+### MLX バックエンド (既定)
+
+すべてローカル実行のため **無料**. 電力消費のみ。
+
+### OpenAI バックエンド
+
+`gpt-realtime-translate` は **$0.034/分** (2026-05 時点)。1 時間の連続使用で約 $2.04。
+
+```
+1 セッション (1時間連続)  ≈ $2.04
+1 営業日 (8時間)          ≈ $16
+1 ヶ月 (営業日 20 日)     ≈ $326
+```
+
+詳細は [OpenAI Realtime 料金ページ](https://developers.openai.com/api/docs/models/gpt-realtime-translate) を参照。
+
 ## 既知の制限事項
 
 - 英語→日本語のみ
-- macOS (Apple Silicon) 専用 (mlx-vlm に依存)
+- macOS (Apple Silicon) 専用 (mlx-vlm に依存. OpenAI バックエンドは macOS 以外でも動くが BlackHole 設定の手順が異なる)
 - 入力デバイスは BlackHole 2ch を想定
 - Gemma 4 の音声入力は E2B / E4B 系のみ対応 (26B MoE / 31B Dense は不可)
 - セグメント完結まで何も表示されない設計 (低レイテンシ最優先ではなく、確定済み出力のストリームを目的とする)
+- 要約機能は MLX バックエンド限定 (OpenAI 単体使用時は無効化される)
 
 ## 設計方針
 
