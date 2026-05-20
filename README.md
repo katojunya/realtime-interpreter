@@ -1,6 +1,6 @@
 # realtime-interpreter
 
-英語音声をマルチモーダル LLM に直接入力して、英語転写 + 日本語訳をリアルタイムにストリーム表示する CLI。
+英語音声をマルチモーダル LLM に直接入力して、英語文字起こし + 日本語訳をリアルタイムにストリーム表示する CLI。
 
 **バックエンド切替対応**:
 
@@ -9,7 +9,7 @@
 | `mlx` (既定) | mlx-vlm + Gemma 4 (ローカル) | オフライン・無料・Apple Silicon ネイティブ |
 | `openai` | OpenAI gpt-realtime-translate (WebSocket) | クラウド・$0.034/分・低レイテンシ・サーバ VAD |
 
-姉妹プロジェクト [`realtime-transcriber`](../realtime-transcriber/) が「Whisper 文字起こし → Ollama 翻訳」の 2 段直列で 7〜15 秒チャンクを処理するのに対し、本ツールは **Whisper を経由せず** Gemma 4 (mlx-vlm) に音声を直接入力し、1 回の推論で **英語転写と日本語訳を同時生成** します。OpenAI バックエンドではサーバ側で同等の処理が走ります。
+本ツールは **Whisper を経由せず** Gemma 4 (mlx-vlm) に音声を直接入力し、1 回の推論で **英語転写と日本語訳を同時生成** します。OpenAI バックエンドではサーバ側で同等の処理が走ります。
 
 ## 出力フォーマット
 
