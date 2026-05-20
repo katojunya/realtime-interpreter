@@ -16,6 +16,7 @@ dependencies = [
     "soundfile>=0.12",
     "websocket-client>=1.8",
     "rich>=13.7",
+    "openai>=1.40",
 ]
 
 [project.scripts]

@@ -44,18 +44,18 @@ OPENAI_SAMPLE_RATE = 24000
 TARGET_LANGUAGE = "ja"
 INPUT_TRANSCRIPTION_MODEL = "gpt-realtime-whisper"
 
-# delta が来なくなってからこの秒数経過 → ターン終了とみなして commit.
+# delta が来なくなってからこのミリ秒経過 → ターン終了とみなして commit.
 # このモデル (gpt-realtime-translate) は EN 1 文を JA 複数文 (例: 挨拶を独立文として
 # 切ってから本文を続ける) で訳すことがあるため、文単位での即時 commit を行うと
 # EN/JA の対応関係が崩れる. そのため発話の切れ目 (= 翻訳がひと段落して delta が
 # 来なくなった瞬間) を唯一の commit トリガとし、対応の整合を優先する。
-TURN_DEBOUNCE_SECONDS = 2.5
+TURN_DEBOUNCE_MS = 300
 
 # 連続発話 (ポーズなし) で 1 チャンクが肥大化するのを防ぐ強制 commit 上限.
 # この秒数に達したら delta が継続中でも強制的に commit する.
 # 強制 commit 時は EN/JA が若干ズレる可能性があるが、表示の可読性を優先.
 # 0 を指定すると無効 (debounce のみで commit).
-OPENAI_MAX_SEGMENT_SECONDS = 15.0
+OPENAI_MAX_SEGMENT_SECONDS = 8.0
 
 # 文末判定ヘルパは保持 (将来 sentence-level splitting を再有効化する場合の参考実装).
 # 現在は EN/JA の切れ目が一致しないため commit には使用しない。
@@ -153,7 +153,7 @@ class OpenAIRealtimeBackend:
         device_name: str,
         api_key: str | None = None,
         model: str = DEFAULT_OPENAI_MODEL,
-        turn_debounce_seconds: float = TURN_DEBOUNCE_SECONDS,
+        turn_debounce_ms: int = TURN_DEBOUNCE_MS,
         max_segment_seconds: float = OPENAI_MAX_SEGMENT_SECONDS,
     ) -> None:
         self._sd = sd_module
@@ -166,7 +166,8 @@ class OpenAIRealtimeBackend:
                 "Set the env var or pass --openai-api-key (not recommended)."
             )
         self._model = model
-        self._turn_debounce_seconds = turn_debounce_seconds
+        # 内部表現は秒. CLI は ms で受け取って秒に変換するためここでも秒に直す。
+        self._turn_debounce_seconds = turn_debounce_ms / 1000.0
         self._max_segment_seconds = max_segment_seconds
 
         self._audio_queue: queue.Queue[np.ndarray] = queue.Queue()

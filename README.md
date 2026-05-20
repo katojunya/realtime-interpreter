@@ -31,7 +31,7 @@ VAD で検出された発話セグメント単位で、確定した結果を 2 �
 
 ```
 BlackHole 2ch
-  → SpeechSegmentCapture (Silero VAD で発話を区切る. 無音 500ms or 最大 15s で finalize)
+  → SpeechSegmentCapture (Silero VAD で発話を区切る. 無音 300ms or 最大 8s で finalize)
   → GemmaAudioTranslator (mlx-vlm + google/gemma-4-e4b-it 4bit)
        1 回の推論で "EN: ... / JA: ..." を生成
   → 確定したセグメント単位で append-only 出力
@@ -56,29 +56,30 @@ BlackHole 2ch
   → 確定行を append-only に永続表示 + ログ
 ```
 
-**ストリーミング表示 + 発話単位の commit (alignment-first)**: delta が届くたびに英語 + 日本語の 2 行が in-place で伸びていきます (Rich Live)。**delta が一定時間 (既定 2.5 秒) 来なくなった時点でその発話を確定** として上に積み上げ、次の発話を新しい in-progress 行として表示します。
+**ストリーミング表示 + 発話単位の commit (alignment-first)**: delta が届くたびに英語 + 日本語の 2 行が in-place で伸びていきます (Rich Live)。**delta が一定時間 (既定 300ms) 来なくなった時点でその発話を確定** として上に積み上げ、次の発話を新しい in-progress 行として表示します。
 
 文単位 (JA `。` / EN `.`) でリアルタイム commit する設計も試したが、本モデルは **EN 1 文を JA 複数文 (例: 挨拶を独立文として切る) で訳す** ことがあり、文単位 commit を行うと EN1 ↔ JA1 だけがペアになって後続がズレるため、現状は debounce ベースに統一している。
 
-`--openai-debounce-seconds` で発話の切れ目検出感度を調整できます (既定 2.5):
+`--openai-debounce-ms` で発話の切れ目検出感度を調整できます (既定 300):
 
 | 値 | トレードオフ |
 |---|---|
-| 1.0〜1.5 | commit 間隔短い. ただし翻訳途中で commit して EN/JA がズレる可能性あり |
-| 2.5 (既定) | バランス. 通常の発話間ポーズで commit |
-| 4.0〜5.0 | より長い文・段落単位で commit. 確実に対応が取れるが表示は遅延する |
+| 200〜300 (既定 300) | レスポンス重視. ただし翻訳途中で commit して EN/JA がズレる可能性あり |
+| 500〜1000 | バランス. 通常の発話間ポーズで commit |
+| 1500〜2500 | より長い文・段落単位で commit. 確実に対応が取れるが表示は遅延する |
 
-`--openai-max-segment-seconds` で **連続発話時の強制 commit 上限** を設定できます (既定 15.0). ポーズなしの長台詞でも N 秒で 1 チャンクに切り分けます:
+`--openai-max-segment-seconds` で **連続発話時の強制 commit 上限** を設定できます (既定 8.0). ポーズなしの長台詞でも N 秒で 1 チャンクに切り分けます:
 
 | 値 | 効果 |
 |---|---|
-| `15` (既定) | 連続発話でも約 15 秒で強制カット. 巨大ブロック化を防止 |
+| `8` (既定) | 連続発話でも約 8 秒で強制カット. 読みやすさ重視 |
+| `15` | 中庸 |
 | `30` | 段落単位の長文を許容 |
 | `0` | 強制カット無効. debounce のみで判定 (連続発話で巨大化する可能性) |
 
 強制 commit 時は EN/JA に若干ズレが生じる可能性がありますが、文単位の即時 commit と比べると軽症です。
 
-要約機能はローカル Gemma 4 を必要とするため、OpenAI バックエンド単体では無効です (`--summary-interval-seconds 0` 推奨)。
+**要約機能** は OpenAI Chat Completions API (既定 `gpt-5-mini`) を使って実装されています。Realtime API とは別経路ですが、**同じ `OPENAI_API_KEY` で動作** するため追加設定不要。コストは要約 1 回あたり概ね $0.0003〜$0.0005、60 秒に 1 回の頻度なら **$0.02〜$0.05/時** ほどで、翻訳コスト ($3/h) に対して誤差レベル。`--openai-summary-model` で gpt-4o-mini など他モデルへ切り替え可能 (`gpt-4o-mini` ならさらに半額)。
 
 ## 必要なディスク容量
 
@@ -116,7 +117,7 @@ export OPENAI_API_KEY=sk-...
 uv run realtime-interpreter --backend openai
 ```
 
-OpenAI バックエンドは **WebSocket ベースのストリーミング** で、サーバ側 VAD によって自動的に発話の切れ目が検出されます。要約機能を使いたい場合は `--backend mlx` を選択してください (要約は Gemma 4 をローカルで再利用するため)。
+OpenAI バックエンドは **WebSocket ベースのストリーミング** で、サーバ側 VAD によって自動的に発話の切れ目が検出されます。要約も同じ API キーで OpenAI Chat Completions 経由 (既定 `gpt-5-mini`) で生成されます。
 
 出力デバイスが Multi-Output Device になっていない場合、起動時に切替を促します。
 終了は `Ctrl+C`。
@@ -127,13 +128,13 @@ OpenAI バックエンドは **WebSocket ベースのストリーミング** で
 |---|---|---|---|
 | `--backend` | `mlx` or `openai` | `mlx` | 共通 |
 | `--device` | 入力デバイス名 | `BlackHole 2ch` | 共通 |
-| `--summary-interval-seconds` | N 秒ごとに過去 N 秒分の英文を日本語要約. `0` で無効 | `60` | mlx のみ |
+| `--summary-interval-seconds` | N 秒ごとに過去 N 秒分の英文を日本語要約. `0` で無効. MLX バックエンドは Gemma 4 を再利用、OpenAI バックエンドは Chat Completions (`--openai-summary-model`) を使用 | `60` | mlx のみ |
 | `--log-dir` | セッションログの出力先 | `logs/` | 共通 |
 | `--debug` | 詳細ログを stderr に出す | (off) | 共通 |
 | `--model` | モデルエイリアス or 完全な HuggingFace ID | `e4b` | mlx |
 | `--list-models` | プリセット一覧を表示して終了 | — | mlx |
-| `--end-silence-ms` | この長さの無音で発話セグメントを区切る | `500` | mlx |
-| `--max-segment-seconds` | 連続発話時のセグメント最大長 (秒) | `15.0` | mlx |
+| `--end-silence-ms` | この長さの無音で発話セグメントを区切る | `300` | mlx |
+| `--max-segment-seconds` | 連続発話時のセグメント最大長 (秒) | `8.0` | mlx |
 | `--openai-model` | Realtime モデル ID | `gpt-realtime-translate` | openai |
 
 環境変数:
@@ -216,7 +217,8 @@ uv run realtime-interpreter --end-silence-ms 250 --max-segment-seconds 6
 
 | 設定例 | 体感 |
 |---|---|
-| `--end-silence-ms 500 --max-segment-seconds 15` (既定) | 文単位でしっかり区切られる. 翻訳品質優先 |
+| `--end-silence-ms 500 --max-segment-seconds 15` | 文単位でしっかり区切られる. 翻訳品質優先 |
+| `--end-silence-ms 300 --max-segment-seconds 8` (既定) | レスポンス重視のバランス型 |
 | `--end-silence-ms 300 --max-segment-seconds 8` | やや早めに区切る. バランス型 |
 | `--end-silence-ms 200 --max-segment-seconds 5` | 細切れ. 反応速度優先, 文が途中で切れることがある |
 
@@ -260,7 +262,7 @@ uv run pytest
 | モデルロード (キャッシュ済) | 約 2.6 秒 |
 | 5.86 秒音声 → EN+JA 出力 | 約 1.0 秒 |
 
-実機での体感レイテンシは「発話終了 (無音 500ms 検知) + 推論 (発話長に応じて 0.5〜2 秒)」で、目安として **発話終了から 1〜3 秒で画面に表示** されます。
+実機での体感レイテンシは「発話終了 (無音 300ms 検知) + 推論 (発話長に応じて 0.5〜2 秒)」で、目安として **発話終了から 1〜3 秒で画面に表示** されます。
 
 ## 料金の目安
 
@@ -270,12 +272,19 @@ uv run pytest
 
 ### OpenAI バックエンド
 
-`gpt-realtime-translate` は **$0.034/分** (2026-05 時点)。1 時間の連続使用で約 $2.04。
+主要コストは Realtime API の翻訳分。要約は誤差レベル。
+
+| 項目 | 単価 | 1 時間あたり |
+|---|---|---|
+| `gpt-realtime-translate` (翻訳) | $0.034/分 | 約 $2.04 |
+| `gpt-realtime-whisper` (英語転写) | $0.017/分 | 約 $1.02 |
+| `gpt-5-mini` (要約, 60s ごと) | 約 $0.0003/回 | 約 **$0.02** |
+| **合計** | | **約 $3.08 / 時** |
 
 ```
-1 セッション (1時間連続)  ≈ $2.04
-1 営業日 (8時間)          ≈ $16
-1 ヶ月 (営業日 20 日)     ≈ $326
+1 セッション (1時間連続)  ≈ $3.08
+1 営業日 (8時間)          ≈ $25
+1 ヶ月 (営業日 20 日)     ≈ $500
 ```
 
 詳細は [OpenAI Realtime 料金ページ](https://developers.openai.com/api/docs/models/gpt-realtime-translate) を参照。
@@ -287,7 +296,7 @@ uv run pytest
 - 入力デバイスは BlackHole 2ch を想定
 - Gemma 4 の音声入力は E2B / E4B 系のみ対応 (26B MoE / 31B Dense は不可)
 - セグメント完結まで何も表示されない設計 (低レイテンシ最優先ではなく、確定済み出力のストリームを目的とする)
-- 要約機能は MLX バックエンド限定 (OpenAI 単体使用時は無効化される)
+- 要約機能はバックエンドごとに別経路 — MLX: ローカル Gemma 4 (text-only) を再利用 / OpenAI: Chat Completions API (`gpt-5-mini` 等)
 
 ## 設計方針
 

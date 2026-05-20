@@ -22,6 +22,7 @@ import argparse
 import logging
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import sounddevice as sd
@@ -39,12 +40,16 @@ from realtime_interpreter.backends.mlx_local import LocalMLXBackend
 from realtime_interpreter.backends.openai_realtime import (
     DEFAULT_OPENAI_MODEL,
     OPENAI_MAX_SEGMENT_SECONDS,
-    TURN_DEBOUNCE_SECONDS,
+    TURN_DEBOUNCE_MS,
     OpenAIRealtimeBackend,
 )
 from realtime_interpreter.renderer import StreamingRenderer
 from realtime_interpreter.session_logger import SessionLogger, format_offset
-from realtime_interpreter.summarizer import Summarizer
+from realtime_interpreter.summarizer import (
+    DEFAULT_OPENAI_SUMMARY_MODEL,
+    OpenAIChatSummarizer,
+    Summarizer,
+)
 from realtime_interpreter.translator import (
     DEFAULT_ALIAS,
     MODEL_PRESETS,
@@ -138,14 +143,14 @@ def _parse_args() -> argparse.Namespace:
         help=f"[openai] Realtime model id (default: {DEFAULT_OPENAI_MODEL!r})",
     )
     openai_group.add_argument(
-        "--openai-debounce-seconds",
-        type=float,
-        default=TURN_DEBOUNCE_SECONDS,
+        "--openai-debounce-ms",
+        type=int,
+        default=TURN_DEBOUNCE_MS,
         help=(
-            "[openai] Commit a chunk after delta has been quiet for this many seconds. "
+            "[openai] Commit a chunk after delta has been quiet for this many milliseconds. "
             "Smaller = more frequent (but higher risk of mid-translation commit causing "
             "EN/JA misalignment). Larger = fewer, longer chunks but properly aligned. "
-            f"(default: {TURN_DEBOUNCE_SECONDS})"
+            f"(default: {TURN_DEBOUNCE_MS})"
         ),
     )
     openai_group.add_argument(
@@ -157,6 +162,15 @@ def _parse_args() -> argparse.Namespace:
             "accumulation, even when delta is still arriving. Prevents huge single "
             "chunks during long monologues. 0 to disable (debounce only). "
             f"(default: {OPENAI_MAX_SEGMENT_SECONDS})"
+        ),
+    )
+    openai_group.add_argument(
+        "--openai-summary-model",
+        default=DEFAULT_OPENAI_SUMMARY_MODEL,
+        help=(
+            "[openai] Chat Completions model used for periodic summaries. "
+            "Requires --summary-interval-seconds > 0. Uses the same OPENAI_API_KEY. "
+            f"(default: {DEFAULT_OPENAI_SUMMARY_MODEL!r})"
         ),
     )
 
@@ -197,7 +211,9 @@ def _print_model_presets() -> None:
     print("(must contain '/'). Set REALTIME_INTERPRETER_MODEL env var to change default.")
 
 
-def _build_backend(args: argparse.Namespace) -> tuple[TranslationBackend, Summarizer | None]:
+def _build_backend(
+    args: argparse.Namespace,
+) -> tuple[TranslationBackend, Summarizer | OpenAIChatSummarizer | None]:
     summary_enabled = args.summary_interval_seconds > 0
 
     if args.backend == "mlx":
@@ -222,25 +238,22 @@ def _build_backend(args: argparse.Namespace) -> tuple[TranslationBackend, Summar
         return backend, summarizer
 
     if args.backend == "openai":
-        if args.openai_debounce_seconds <= 0:
-            raise SystemExit("error: --openai-debounce-seconds must be positive")
+        if args.openai_debounce_ms <= 0:
+            raise SystemExit("error: --openai-debounce-ms must be positive")
         if args.openai_max_segment_seconds < 0:
             raise SystemExit("error: --openai-max-segment-seconds must be >= 0 (0 disables)")
         backend = OpenAIRealtimeBackend(
             sd_module=sd,
             device_name=args.device,
             model=args.openai_model,
-            turn_debounce_seconds=args.openai_debounce_seconds,
+            turn_debounce_ms=args.openai_debounce_ms,
             max_segment_seconds=args.openai_max_segment_seconds,
         )
-        summarizer = None
-        if summary_enabled:
-            print(
-                "⚠ --summary-interval-seconds is set but ignored on the openai backend "
-                "(local Gemma 4 not loaded). Use --backend mlx to enable summarization, "
-                "or --summary-interval-seconds 0 to silence this warning.",
-                file=sys.stderr,
-            )
+        summarizer = (
+            OpenAIChatSummarizer(model=args.openai_summary_model)
+            if summary_enabled
+            else None
+        )
         return backend, summarizer
 
     raise SystemExit(f"unknown backend: {args.backend}")
@@ -266,17 +279,24 @@ def _emit_settings(args: argparse.Namespace) -> None:
             if args.openai_max_segment_seconds > 0
             else "off"
         )
+        if args.summary_interval_seconds > 0:
+            summary_label = (
+                f"every {args.summary_interval_seconds}s ({args.openai_summary_model})"
+            )
+        else:
+            summary_label = "off"
         print(
             f"Backend: openai ({args.openai_model}) | "
-            f"debounce={args.openai_debounce_seconds}s, "
+            f"debounce={args.openai_debounce_ms}ms, "
             f"max_segment={max_seg_str} | "
-            f"summary={'off (openai backend)' if summary_str != 'off' else 'off'}",
+            f"summary={summary_label}",
             file=sys.stderr,
         )
 
 
-def _maybe_summarize(
-    summarizer: Summarizer,
+def _submit_summary_task(
+    executor: ThreadPoolExecutor,
+    summarizer: Summarizer | OpenAIChatSummarizer,
     english_buffer: list[tuple[float, str]],
     since_offset: float,
     until_offset: float,
@@ -284,30 +304,31 @@ def _maybe_summarize(
     session_logger: SessionLogger,
     renderer: StreamingRenderer,
 ) -> None:
+    """要約タスクをバックグラウンド executor に投げる.
+
+    Submit 後すぐに return するためメインループ (翻訳パイプライン) はブロックしない.
+    ワーカー側で完了時に renderer / session_logger に直接書き込む.
+    Rich Live は内部ロックで thread-safe なので別スレッドからの emit_summary は問題ない。
+    """
     items = [text for ts, text in english_buffer if ts >= since_offset]
     if not items:
         return
     en_concat = " ".join(items)
 
-    renderer.update_status(f"⏳ Summarizing last {duration_seconds}s...")
-    try:
-        summary = summarizer.summarize(en_concat, duration_seconds)
-    except Exception:
-        logger.exception("summarization failed")
-        renderer.update_status("● Listening...")
-        return
-    renderer.update_status("● Listening...")
-
-    if summary.text:
+    def _worker() -> None:
+        try:
+            summary = summarizer.summarize(en_concat, duration_seconds)
+        except Exception:
+            logger.exception("summary task failed")
+            return
+        if not summary.text:
+            # summarizer 側で原因 (空応答 / max_completion_tokens 不足 等) を WARN ログ済み
+            return
         ts = format_offset(until_offset)
-        logger.debug(
-            "summary %s infer=%.2fs / %s",
-            ts,
-            summary.latency_seconds,
-            summary.text[:80],
-        )
         renderer.emit_summary(ts, summary.text)
         session_logger.log_summary(ts, summary.text)
+
+    executor.submit(_worker)
 
 
 def main() -> None:
@@ -345,6 +366,14 @@ def main() -> None:
     summary_last_offset = 0.0
     summary_interval = float(args.summary_interval_seconds)
 
+    # 要約はメインループから切り離して別スレッドで実行 (1〜3秒 API 待ちで翻訳が止まらないように)。
+    # max_workers=1: 同時に複数の要約が走らないようにシリアル化 (連続発火しても順次処理).
+    summary_executor: ThreadPoolExecutor | None = (
+        ThreadPoolExecutor(max_workers=1, thread_name_prefix="summary")
+        if summarizer is not None
+        else None
+    )
+
     try:
         with backend, StreamingRenderer() as renderer:
             renderer.update_status("● Listening...")
@@ -366,11 +395,14 @@ def main() -> None:
                 segment_end = seg.start_offset_seconds + seg.duration_seconds
                 if (
                     summarizer is not None
+                    and summary_executor is not None
                     and segment_end - summary_last_offset >= summary_interval > 0
                 ):
-                    _maybe_summarize(
+                    # 非同期投入. メインループは即座に次セグメント処理へ戻る.
+                    _submit_summary_task(
+                        summary_executor,
                         summarizer,
-                        english_buffer,
+                        list(english_buffer),  # worker に渡すスナップショット
                         summary_last_offset,
                         segment_end,
                         int(summary_interval),
@@ -388,6 +420,9 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        if summary_executor is not None:
+            # 進行中の要約タスクは完了まで待つ (まだ表示されてない要約を取りこぼさない).
+            summary_executor.shutdown(wait=True)
         session_logger.close()
         print(f"\nLog: {session_logger.path}", file=sys.stderr)
 

@@ -28,9 +28,9 @@ SAMPLE_RATE = 16000
 VAD_THRESHOLD = 0.3
 
 # 発話終了とみなす無音の長さ (ms)
-END_SILENCE_MS = 500
+END_SILENCE_MS = 300
 # セグメントの最大長 (これを超えたら強制 finalize)
-MAX_SEGMENT_SECONDS = 15.0
+MAX_SEGMENT_SECONDS = 8.0
 # これより短いセグメントはノイズとして捨てる
 MIN_SEGMENT_SECONDS = 0.5
 
