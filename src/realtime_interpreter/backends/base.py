@@ -15,12 +15,15 @@ class TranslatedSegment:
                      複数回 yield される. 後続の yield で上書きされる前提.
     is_partial=False: ターン確定 (発話終了). この値以降は同じターンで更新されない。
                       ログ・要約バッファ等の永続処理はこちらの値を使う。
+
+    フィールド `source` / `target` は言語非依存. 翻訳元 (例: 英語) が source, 翻訳先
+    (例: 日本語) が target. 表示上は source を上, target を下に出す。
     """
 
     start_offset_seconds: float
     duration_seconds: float
-    english: str
-    japanese: str
+    source: str
+    target: str
     is_partial: bool = False
 
 

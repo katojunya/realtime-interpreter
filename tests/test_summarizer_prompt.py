@@ -18,7 +18,17 @@ def test_prompt_strips_text() -> None:
     assert "  Hello  " not in prompt
 
 
-def test_prompt_mentions_japanese_output() -> None:
+def test_prompt_mentions_target_language() -> None:
+    """既定 (en→ja) の場合、Japanese が target として出てくること."""
     prompt = build_summary_prompt("foo", 60)
-    # ルール部に日本語出力指示が含まれること
-    assert "日本語" in prompt
+    assert "Japanese" in prompt
+    assert "English" in prompt
+
+
+def test_prompt_uses_custom_languages() -> None:
+    """source_lang/target_lang を渡すと言語名が差し替わること."""
+    prompt = build_summary_prompt("hola", 60, source_lang="es", target_lang="en")
+    assert "Spanish" in prompt
+    assert "English" in prompt
+    # 既定で使われていた Japanese / English (source) は消えていること
+    assert "Japanese" not in prompt

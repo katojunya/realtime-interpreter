@@ -43,13 +43,13 @@ class SessionLogger:
         """セッション開始からの経過時間を mm:ss で返す."""
         return format_offset(time.monotonic() - self._start)
 
-    def log_segment(self, ts: str, english: str, japanese: str) -> None:
-        """1 セグメントの英語転写と日本語訳をペアで記録."""
-        if english.strip():
-            self._fh.write(f"[{ts}] {english.strip()}\n")
-        if japanese.strip():
-            self._fh.write(f"[{ts}] {japanese.strip()}\n")
-        if english.strip() or japanese.strip():
+    def log_segment(self, ts: str, source: str, target: str) -> None:
+        """1 セグメントの source 転写と target 訳をペアで記録."""
+        if source.strip():
+            self._fh.write(f"[{ts}] {source.strip()}\n")
+        if target.strip():
+            self._fh.write(f"[{ts}] {target.strip()}\n")
+        if source.strip() or target.strip():
             self._fh.write("\n")
 
     def log_summary(self, ts: str, text: str) -> None:

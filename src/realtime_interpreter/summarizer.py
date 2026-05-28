@@ -1,4 +1,4 @@
-"""日本語要約モジュール.
+"""要約モジュール.
 
 2 つのバックエンドを提供する:
 
@@ -7,7 +7,8 @@
 - `OpenAIChatSummarizer` (クラウド): OpenAI Chat Completions API で gpt-5-mini 等を呼ぶ.
   OpenAI バックエンドと同じ API キーで使える. Realtime API とは別経路.
 
-どちらも同じ `summarize(english_text, duration_seconds) -> SummaryResult` インターフェース。
+どちらも同じ `summarize(source_text, duration_seconds) -> SummaryResult` インターフェース。
+プロンプトは英語で、source/target 言語名を placeholder で埋める方式。
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+
+from realtime_interpreter.i18n import DEFAULT_SOURCE, DEFAULT_TARGET, language_name
 
 logger = logging.getLogger(__name__)
 
@@ -37,16 +40,16 @@ OPENAI_SUMMARY_MAX_COMPLETION_TOKENS = 2048
 
 
 SUMMARY_PROMPT_TEMPLATE = (
-    "あなたは英語の発話を日本語に要約するプロです。"
-    "以下は過去 {duration} 秒間の英語発話の書き起こしです。\n"
+    "You are an expert at summarizing {source_language} speech into {target_language}. "
+    "Below is the transcript of the past {duration} seconds of {source_language} speech.\n"
     "\n"
-    "## 出力ルール\n"
-    "- 日本語で 2〜4 文に簡潔にまとめる\n"
-    "- 出力は要約本文のみ. 前置き・引用符・「要約:」のようなプレフィックスは禁止\n"
-    "- 技術用語 (CPU / AWS / GPU など) は英語のままで良い\n"
-    "- 入力が短すぎる、または意味を成さない場合は何も出力しない\n"
+    "## Output rules\n"
+    "- Write a concise summary in {target_language} (2-4 sentences).\n"
+    "- Output ONLY the summary body. No prefix (e.g. 'Summary:'), no quotes, no preamble.\n"
+    "- Keep technical terms (CPU, AWS, GPU, etc.) in their original form where natural.\n"
+    "- If the input is too short or unintelligible, output nothing.\n"
     "\n"
-    "## 英語書き起こし\n"
+    "## {source_language} transcript\n"
     "{text}\n"
 )
 
@@ -59,17 +62,26 @@ class SummaryResult:
     latency_seconds: float
 
 
-def build_summary_prompt(english_text: str, duration_seconds: int) -> str:
-    """要約プロンプトを組み立てる."""
+def build_summary_prompt(
+    source_text: str,
+    duration_seconds: int,
+    source_lang: str = DEFAULT_SOURCE,
+    target_lang: str = DEFAULT_TARGET,
+) -> str:
+    """要約プロンプトを組み立てる. 言語名は ISO コードから英名へ展開."""
     return SUMMARY_PROMPT_TEMPLATE.format(
-        text=english_text.strip(), duration=duration_seconds
+        text=source_text.strip(),
+        duration=duration_seconds,
+        source_language=language_name(source_lang),
+        target_language=language_name(target_lang),
     )
 
 
 class Summarizer:
-    """共有された Gemma 4 モデルで日本語要約を生成する.
+    """共有された Gemma 4 モデルで target 言語の要約を生成する.
 
     Translator が既にロードしたモデルインスタンスをそのまま使う。
+    source_lang / target_lang はプロンプト言語名に展開される。
     """
 
     def __init__(
@@ -78,21 +90,29 @@ class Summarizer:
         max_tokens: int = SUMMARY_MAX_TOKENS,
         temperature: float = SUMMARY_TEMPERATURE,
         top_p: float = SUMMARY_TOP_P,
+        source_lang: str = DEFAULT_SOURCE,
+        target_lang: str = DEFAULT_TARGET,
     ) -> None:
         self._translator = translator
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.top_p = top_p
+        self.source_lang = source_lang
+        self.target_lang = target_lang
 
-    def summarize(self, english_text: str, duration_seconds: int) -> SummaryResult:
-        """過去 N 秒の英文を日本語要約に変換."""
-        if not english_text.strip():
+    def summarize(self, source_text: str, duration_seconds: int) -> SummaryResult:
+        """過去 N 秒の source 言語テキストを target 言語要約に変換."""
+        if not source_text.strip():
             return SummaryResult(text="", latency_seconds=0.0)
 
         from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template
 
-        prompt_text = build_summary_prompt(english_text, duration_seconds)
+        prompt_text = build_summary_prompt(
+            source_text, duration_seconds,
+            source_lang=self.source_lang,
+            target_lang=self.target_lang,
+        )
         # num_audios=0 でテキスト専用. audio kwarg を omit して generate を呼ぶ。
         prompt = apply_chat_template(
             self._translator.processor,
@@ -128,7 +148,7 @@ def _extract_text(result: object) -> str:
 
 
 class OpenAIChatSummarizer:
-    """OpenAI Chat Completions による日本語要約器.
+    """OpenAI Chat Completions による target 言語要約器.
 
     Realtime API (gpt-realtime-translate) とは別経路で Chat API を叩く。
     既存の OPENAI_API_KEY をそのまま再利用するため追加認証は不要。
@@ -142,6 +162,8 @@ class OpenAIChatSummarizer:
         model: str = DEFAULT_OPENAI_SUMMARY_MODEL,
         api_key: str | None = None,
         max_completion_tokens: int = OPENAI_SUMMARY_MAX_COMPLETION_TOKENS,
+        source_lang: str = DEFAULT_SOURCE,
+        target_lang: str = DEFAULT_TARGET,
     ) -> None:
         self._model = model
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
@@ -151,6 +173,8 @@ class OpenAIChatSummarizer:
                 "Required for the OpenAI Chat summarizer."
             )
         self._max_completion_tokens = max_completion_tokens
+        self.source_lang = source_lang
+        self.target_lang = target_lang
         self._client = None  # type: ignore[assignment]
 
     def _ensure_client(self) -> None:
@@ -159,13 +183,17 @@ class OpenAIChatSummarizer:
 
             self._client = OpenAI(api_key=self._api_key)
 
-    def summarize(self, english_text: str, duration_seconds: int) -> SummaryResult:
-        if not english_text.strip():
+    def summarize(self, source_text: str, duration_seconds: int) -> SummaryResult:
+        if not source_text.strip():
             return SummaryResult(text="", latency_seconds=0.0)
 
         self._ensure_client()
         assert self._client is not None
-        prompt_text = build_summary_prompt(english_text, duration_seconds)
+        prompt_text = build_summary_prompt(
+            source_text, duration_seconds,
+            source_lang=self.source_lang,
+            target_lang=self.target_lang,
+        )
 
         t0 = time.perf_counter()
         try:

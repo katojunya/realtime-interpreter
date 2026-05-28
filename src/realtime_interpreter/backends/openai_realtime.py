@@ -1,7 +1,7 @@
 """OpenAI gpt-realtime-translate バックエンド.
 
-WebSocket 経由で 24kHz PCM16 音声をストリームし、英語転写と日本語訳の delta を
-受け取って累積する。translation session には `*.completed` / `*.done` イベントが
+WebSocket 経由で 24kHz PCM16 音声をストリームし、source 言語の転写と target 言語訳の
+delta を受け取って累積する。translation session には `*.completed` / `*.done` イベントが
 **存在しない** ため、ターン終了は「一定時間 delta が来ないこと」を debounce で
 判定する (= 発話の切れ目).
 
@@ -13,8 +13,8 @@ WebSocket 経由で 24kHz PCM16 音声をストリームし、英語転写と日
 
 公式に定義されているサーバイベント:
 - session.created / session.updated / session.closed
-- session.input_transcript.delta   (英語; 入力転写を有効化したとき)
-- session.output_transcript.delta  (日本語; 翻訳テキスト)
+- session.input_transcript.delta   (source 言語; 入力転写を有効化したとき)
+- session.output_transcript.delta  (target 言語; 翻訳テキスト)
 - session.output_audio.delta       (翻訳音声; 本実装では使用しない)
 - error
 """
@@ -35,13 +35,13 @@ from typing import Iterator
 import numpy as np
 
 from realtime_interpreter.backends.base import TranslatedSegment
+from realtime_interpreter.i18n import DEFAULT_SOURCE, DEFAULT_TARGET
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_OPENAI_MODEL = "gpt-realtime-translate"
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime/translations"
 OPENAI_SAMPLE_RATE = 24000
-TARGET_LANGUAGE = "ja"
 INPUT_TRANSCRIPTION_MODEL = "gpt-realtime-whisper"
 
 # delta が来なくなってからこのミリ秒経過 → ターン終了とみなして commit.
@@ -119,17 +119,17 @@ class _PendingTurn:
     start_offset_seconds: float
     started_at: float
     last_activity_at: float
-    english_parts: list[str] = field(default_factory=list)
-    japanese_parts: list[str] = field(default_factory=list)
+    source_parts: list[str] = field(default_factory=list)
+    target_parts: list[str] = field(default_factory=list)
 
-    def english(self) -> str:
-        return "".join(self.english_parts).strip()
+    def source(self) -> str:
+        return "".join(self.source_parts).strip()
 
-    def japanese(self) -> str:
-        return "".join(self.japanese_parts).strip()
+    def target(self) -> str:
+        return "".join(self.target_parts).strip()
 
     def has_content(self) -> bool:
-        return bool(self.english() or self.japanese())
+        return bool(self.source() or self.target())
 
 
 class OpenAIRealtimeBackend:
@@ -155,6 +155,8 @@ class OpenAIRealtimeBackend:
         model: str = DEFAULT_OPENAI_MODEL,
         turn_debounce_ms: int = TURN_DEBOUNCE_MS,
         max_segment_seconds: float = OPENAI_MAX_SEGMENT_SECONDS,
+        source_lang: str = DEFAULT_SOURCE,
+        target_lang: str = DEFAULT_TARGET,
     ) -> None:
         self._sd = sd_module
         self._device_name = device_name
@@ -169,6 +171,9 @@ class OpenAIRealtimeBackend:
         # 内部表現は秒. CLI は ms で受け取って秒に変換するためここでも秒に直す。
         self._turn_debounce_seconds = turn_debounce_ms / 1000.0
         self._max_segment_seconds = max_segment_seconds
+        # source は Whisper の auto-detect に任せる. target は session config で指定.
+        self.source_lang = source_lang
+        self.target_lang = target_lang
 
         self._audio_queue: queue.Queue[np.ndarray] = queue.Queue()
         self._segment_queue: queue.Queue[TranslatedSegment] = queue.Queue()
@@ -254,8 +259,10 @@ class OpenAIRealtimeBackend:
         logger.info("connected to %s", url)
 
     def _send_session_config(self) -> None:
-        # 出力 (target=ja) は常に有効. 入力 (source=en) の transcript は
-        # gpt-realtime-whisper を input.transcription.model に指定して有効化する。
+        # 出力言語は self.target_lang (ISO 639-1) を `audio.output.language` に指定.
+        # 入力 (source) の transcript は gpt-realtime-whisper で. source 言語は Whisper
+        # の auto-detect 任せ (multilingual で安定). 明示したい場合は input.transcription.language
+        # に渡す手もあるが、auto のほうが多くの音声で堅牢。
         msg = {
             "type": "session.update",
             "session": {
@@ -264,7 +271,7 @@ class OpenAIRealtimeBackend:
                         "transcription": {"model": INPUT_TRANSCRIPTION_MODEL},
                         "noise_reduction": {"type": "near_field"},
                     },
-                    "output": {"language": TARGET_LANGUAGE},
+                    "output": {"language": self.target_lang},
                 },
             },
         }
@@ -445,7 +452,7 @@ class OpenAIRealtimeBackend:
         with self._pending_lock:
             self._ensure_pending_locked()
             assert self._pending_turn is not None
-            self._pending_turn.english_parts.append(delta)
+            self._pending_turn.source_parts.append(delta)
             self._pending_turn.last_activity_at = time.monotonic()
             # 文末での即時 commit は EN/JA のズレを生むので使わない. 進行中表示のみ更新。
             self._emit_partial_locked()
@@ -454,7 +461,7 @@ class OpenAIRealtimeBackend:
         with self._pending_lock:
             self._ensure_pending_locked()
             assert self._pending_turn is not None
-            self._pending_turn.japanese_parts.append(delta)
+            self._pending_turn.target_parts.append(delta)
             self._pending_turn.last_activity_at = time.monotonic()
             self._emit_partial_locked()
 
@@ -470,47 +477,47 @@ class OpenAIRealtimeBackend:
         while True:
             if self._pending_turn is None:
                 return
-            ja_text = self._pending_turn.japanese()
-            en_text = self._pending_turn.english()
+            tgt_text = self._pending_turn.target()
+            src_text = self._pending_turn.source()
 
-            ja_idx = _first_complete_sentence_end_ja(ja_text)
-            en_idx = _first_complete_sentence_end_en(en_text)
+            tgt_idx = _first_complete_sentence_end_ja(tgt_text)
+            src_idx = _first_complete_sentence_end_en(src_text)
 
-            if ja_idx is None or en_idx is None:
+            if tgt_idx is None or src_idx is None:
                 # 両方に文末が無いと commit できない. 現状を partial として表示.
                 if self._pending_turn.has_content():
                     self._emit_partial_locked()
                 return
 
             # 両方に文末あり → 切って commit
-            self._commit_prefix_as_final_locked(en_idx, ja_idx)
+            self._commit_prefix_as_final_locked(src_idx, tgt_idx)
             # ループ: carryover にさらなる文末が含まれているかチェック
 
-    def _commit_prefix_as_final_locked(self, en_end: int, ja_end: int) -> None:
+    def _commit_prefix_as_final_locked(self, src_end: int, tgt_end: int) -> None:
         """Pending turn の en[:en_end] / ja[:ja_end] を final で emit, 残りは新 pending."""
         assert self._pending_turn is not None
         turn = self._pending_turn
-        en_full = turn.english()
-        ja_full = turn.japanese()
+        src_full = turn.source()
+        tgt_full = turn.target()
 
-        en_commit = en_full[:en_end].strip()
-        ja_commit = ja_full[:ja_end].strip()
+        src_commit = src_full[:src_end].strip()
+        tgt_commit = tgt_full[:tgt_end].strip()
 
-        if en_commit or ja_commit:
+        if src_commit or tgt_commit:
             duration = max(0.0, turn.last_activity_at - turn.started_at)
             seg = TranslatedSegment(
                 start_offset_seconds=turn.start_offset_seconds,
                 duration_seconds=duration,
-                english=en_commit,
-                japanese=ja_commit,
+                source=src_commit,
+                target=tgt_commit,
                 is_partial=False,
             )
             self._segment_queue.put(seg)
 
-        en_rem = en_full[en_end:]
-        ja_rem = ja_full[ja_end:]
+        src_rem = src_full[src_end:]
+        tgt_rem = tgt_full[tgt_end:]
 
-        if not en_rem.strip() and not ja_rem.strip():
+        if not src_rem.strip() and not tgt_rem.strip():
             # carryover なし → pending クリア (in-progress 表示も次の commit() でクリア済み)
             self._pending_turn = None
             return
@@ -522,8 +529,8 @@ class OpenAIRealtimeBackend:
             start_offset_seconds=offset,
             started_at=now,
             last_activity_at=now,
-            english_parts=[en_rem] if en_rem else [],
-            japanese_parts=[ja_rem] if ja_rem else [],
+            source_parts=[src_rem] if src_rem else [],
+            target_parts=[tgt_rem] if tgt_rem else [],
         )
 
     # ---------------- emit loop (debounce) ----------------
@@ -570,8 +577,8 @@ class OpenAIRealtimeBackend:
         seg = TranslatedSegment(
             start_offset_seconds=turn.start_offset_seconds,
             duration_seconds=duration,
-            english=turn.english(),
-            japanese=turn.japanese(),
+            source=turn.source(),
+            target=turn.target(),
             is_partial=True,
         )
         self._segment_queue.put(seg)
@@ -584,8 +591,8 @@ class OpenAIRealtimeBackend:
         seg = TranslatedSegment(
             start_offset_seconds=turn.start_offset_seconds,
             duration_seconds=duration,
-            english=turn.english(),
-            japanese=turn.japanese(),
+            source=turn.source(),
+            target=turn.target(),
             is_partial=False,
         )
         self._segment_queue.put(seg)

@@ -1,7 +1,7 @@
-"""mlx-vlm + Gemma 4 による直接音声→(英語転写, 日本語訳) 出力.
+"""mlx-vlm + Gemma 4 による直接音声→(source 転写, target 訳) 出力.
 
-VAD で確定した発話セグメントを受け取り、Gemma 4 に「英語の書き起こし」と
-「日本語訳」の両方を 1 回の推論で生成させる。
+VAD で確定した発話セグメントを受け取り、Gemma 4 に「source 言語の書き起こし」と
+「target 言語の翻訳」の両方を 1 回の推論で生成させる。
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import soundfile as sf
+
+from realtime_interpreter.i18n import DEFAULT_SOURCE, DEFAULT_TARGET, language_name
 
 logger = logging.getLogger(__name__)
 
@@ -67,68 +69,69 @@ def resolve_model_id(name: str | None) -> str:
     )
 
 
-# 英語転写と日本語訳を 1 回の推論で取り出すための構造化プロンプト.
+# source 転写と target 訳を 1 回の推論で取り出すための構造化プロンプト.
+# `{source_language}` / `{target_language}` を .format() で展開して使う。
 TRANSCRIBE_AND_TRANSLATE_PROMPT = (
-    "You are a professional simultaneous interpreter from English to Japanese. "
-    "The audio contains English speech.\n"
+    "You are a professional simultaneous interpreter from {source_language} to {target_language}. "
+    "The audio contains {source_language} speech.\n"
     "\n"
-    "Transcribe the speech in English, then translate it to Japanese.\n"
+    "Transcribe the speech in {source_language}, then translate it to {target_language}.\n"
     "Output EXACTLY in this format, with no extra text or commentary:\n"
-    "EN: <verbatim English transcription>\n"
-    "JA: <natural Japanese translation>\n"
+    "SRC: <verbatim {source_language} transcription>\n"
+    "TGT: <natural {target_language} translation>\n"
     "\n"
     "Rules:\n"
-    "- Keep technical terms (CPU, AWS, GPU, API, etc.) in English where natural.\n"
+    "- Keep technical terms (CPU, AWS, GPU, API, etc.) in their original form where natural.\n"
     "- Do not invent content. Translate only what is clearly audible.\n"
     "- Do not repeat words or phrases.\n"
     "- If the audio is silent or unintelligible, output exactly:\n"
-    "  EN:\n"
-    "  JA:\n"
+    "  SRC:\n"
+    "  TGT:\n"
 )
 
 
 @dataclass
 class TranslationResult:
-    """1 セグメント分の推論結果."""
+    """1 セグメント分の推論結果. 言語非依存 (source/target)."""
 
-    english: str
-    japanese: str
+    source: str
+    target: str
     latency_seconds: float
 
 
-_EN_LINE = re.compile(r"^\s*EN\s*:\s*(.*)$", re.IGNORECASE)
-_JA_LINE = re.compile(r"^\s*JA\s*:\s*(.*)$", re.IGNORECASE)
+_SRC_LINE = re.compile(r"^\s*SRC\s*:\s*(.*)$", re.IGNORECASE)
+_TGT_LINE = re.compile(r"^\s*TGT\s*:\s*(.*)$", re.IGNORECASE)
 
 
-def _parse_en_ja(text: str) -> tuple[str, str]:
-    """モデル出力から EN: / JA: 行を抽出する.
+def _parse_src_tgt(text: str) -> tuple[str, str]:
+    """モデル出力から SRC: / TGT: 行を抽出する.
 
     モデルが指示形式から外れた場合のフォールバックとして:
-    - "EN:" / "JA:" タグが見つからなければ、全体を JA とみなす (英語空)。
+    - "SRC:" / "TGT:" タグが見つからなければ、全体を target とみなす (source 空)。
     - 同じタグが複数行ある場合は最後を採用 (まれに前置きを生成するため).
     """
-    en = ""
-    ja = ""
+    src = ""
+    tgt = ""
     found_tag = False
     for line in text.splitlines():
-        m = _EN_LINE.match(line)
+        m = _SRC_LINE.match(line)
         if m:
-            en = m.group(1).strip()
+            src = m.group(1).strip()
             found_tag = True
             continue
-        m = _JA_LINE.match(line)
+        m = _TGT_LINE.match(line)
         if m:
-            ja = m.group(1).strip()
+            tgt = m.group(1).strip()
             found_tag = True
             continue
     if not found_tag:
-        # 想定形式から外れた → 全体を JA として扱う
-        ja = text.strip()
-    return en, ja
+        # 想定形式から外れた → 全体を target として扱う
+        tgt = text.strip()
+    return src, tgt
 
 
 class GemmaAudioTranslator:
-    """Gemma 4 (mlx-vlm) を使った音声→(英語転写, 日本語訳) ペア生成器.
+    """Gemma 4 (mlx-vlm) を使った音声→(source 転写, target 訳) ペア生成器.
 
     各 translate() 呼び出しは独立で、状態を持たない。
     モデルロードは初回 translate() で遅延実行する。
@@ -140,15 +143,26 @@ class GemmaAudioTranslator:
         max_tokens: int = 384,
         temperature: float = 0.0,
         top_p: float = 0.9,
+        source_lang: str = DEFAULT_SOURCE,
+        target_lang: str = DEFAULT_TARGET,
     ) -> None:
         """Args:
             model: モデル指定. エイリアス (e4b/e2b等), 完全な HuggingFace ID, または None.
                    None の場合は環境変数 REALTIME_INTERPRETER_MODEL → DEFAULT_ALIAS の順で解決。
+            source_lang: 翻訳元言語 ISO 639-1 コード (例: "en").
+            target_lang: 翻訳先言語 ISO 639-1 コード (例: "ja").
         """
         self.model_id = resolve_model_id(model)
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.top_p = top_p
+        self.source_lang = source_lang
+        self.target_lang = target_lang
+        # プロンプトを起動時に 1 回だけ format して以後再利用
+        self._prompt = TRANSCRIBE_AND_TRANSLATE_PROMPT.format(
+            source_language=language_name(source_lang),
+            target_language=language_name(target_lang),
+        )
         self._model = None
         self._processor = None
 
@@ -176,7 +190,7 @@ class GemmaAudioTranslator:
         return self._processor
 
     def translate(self, audio: np.ndarray) -> TranslationResult:
-        """音声波形 (モノラル float32 @ 16kHz) を英語転写 + 日本語訳に変換."""
+        """音声波形 (モノラル float32 @ 16kHz) を source 転写 + target 訳に変換."""
         self.load()
 
         from mlx_vlm import generate
@@ -191,7 +205,7 @@ class GemmaAudioTranslator:
         prompt = apply_chat_template(
             self._processor,
             self._model.config,
-            TRANSCRIBE_AND_TRANSLATE_PROMPT,
+            self._prompt,
             num_audios=1,
         )
 
@@ -209,9 +223,9 @@ class GemmaAudioTranslator:
         latency = time.perf_counter() - t0
 
         raw = _extract_text(result)
-        en, ja = _parse_en_ja(raw)
+        src, tgt = _parse_src_tgt(raw)
         logger.debug("raw model output: %r", raw)
-        return TranslationResult(english=en, japanese=ja, latency_seconds=latency)
+        return TranslationResult(source=src, target=tgt, latency_seconds=latency)
 
 
 def _extract_text(result: object) -> str:

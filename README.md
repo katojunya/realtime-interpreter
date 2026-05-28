@@ -1,6 +1,6 @@
 # realtime-interpreter
 
-英語音声をマルチモーダル LLM に直接入力して、英語文字起こし + 日本語訳をリアルタイムにストリーム表示する CLI。
+音声をマルチモーダル LLM に直接入力して、**source 言語の文字起こし + target 言語の訳** をリアルタイムにストリーム表示する CLI。既定は **英語 → 日本語** で、`--source-lang` / `--target-lang` (短縮形 `--from` / `--to`, `-s` / `-t`) で任意の言語ペアに切り替え可能。
 
 **バックエンド切替対応**:
 
@@ -128,7 +128,10 @@ OpenAI バックエンドは **WebSocket ベースのストリーミング** で
 |---|---|---|---|
 | `--backend` | `mlx` or `openai` | `mlx` | 共通 |
 | `--device` | 入力デバイス名 | `BlackHole 2ch` | 共通 |
-| `--summary-interval-seconds` | N 秒ごとに過去 N 秒分の英文を日本語要約. `0` で無効. MLX バックエンドは Gemma 4 を再利用、OpenAI バックエンドは Chat Completions (`--openai-summary-model`) を使用 | `60` | mlx のみ |
+| `--source-lang` / `--from` / `-s` | 音声の言語 (ISO 639-1) | `en` | 共通 |
+| `--target-lang` / `--to` / `-t` | 翻訳先の言語 (ISO 639-1) | `ja` | 共通 |
+| `--list-languages` | 既知の言語コードを表示して終了 | — | 共通 |
+| `--summary-interval-seconds` | N 秒ごとに過去 N 秒分の source 言語テキストを target 言語で要約. `0` で無効. MLX は Gemma 4 を再利用、OpenAI は Chat Completions (`--openai-summary-model`) を使用 | `60` | 共通 |
 | `--log-dir` | セッションログの出力先 | `logs/` | 共通 |
 | `--debug` | 詳細ログを stderr に出す | (off) | 共通 |
 | `--model` | モデルエイリアス or 完全な HuggingFace ID | `e4b` | mlx |
@@ -140,6 +143,44 @@ OpenAI バックエンドは **WebSocket ベースのストリーミング** で
 環境変数:
 - `REALTIME_INTERPRETER_MODEL`: MLX デフォルトモデルの上書き (エイリアスでも完全 ID でも可)
 - `OPENAI_API_KEY`: OpenAI バックエンド使用時に必須
+
+### 言語の切り替え
+
+ISO 639-1 (2 文字コード) で source / target を指定します. 両バックエンドで共通。
+
+```bash
+# 既定: 英語 → 日本語
+uv run realtime-interpreter
+
+# 短縮形 (mlx or openai どちらでも)
+uv run realtime-interpreter -s en -t es     # 英語 → スペイン語
+uv run realtime-interpreter --from zh --to en  # 中国語 → 英語
+uv run realtime-interpreter --source-lang ja --target-lang en  # 日本語 → 英語
+
+# 既知の言語コード一覧
+uv run realtime-interpreter --list-languages
+```
+
+主要な言語コード:
+
+| コード | 言語 | コード | 言語 | コード | 言語 |
+|---|---|---|---|---|---|
+| `en` | English | `ja` | Japanese | `es` | Spanish |
+| `fr` | French | `de` | German | `it` | Italian |
+| `pt` | Portuguese | `zh` | Chinese | `ko` | Korean |
+| `ru` | Russian | `ar` | Arabic | `nl` | Dutch |
+| ... | (他は `--list-languages` で確認) | | | | |
+
+#### バックエンド別の挙動
+
+| バックエンド | source | target |
+|---|---|---|
+| **mlx** | プロンプトに言語名を埋め込んで Gemma 4 に渡す. 多言語対応だが品質は言語ペアに依存 | 同上 |
+| **openai** | `gpt-realtime-whisper` が **自動検出** (source 指定はメタ情報として保持するのみ) | `audio.output.language` に target コードを設定 |
+
+#### OpenAI の制約
+
+`gpt-realtime-translate` は **target が ~13 言語に限定** (公式仕様). 範囲外を指定すると API がエラーを返します. 本ツールは事前 validation は行わず API エラーに委ねる方針です. 不明な場合は OpenAI の [Realtime Translation ドキュメント](https://developers.openai.com/api/docs/guides/realtime-translation) を参照してください。
 
 ### モデルの切り替え
 

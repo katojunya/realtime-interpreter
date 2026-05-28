@@ -1,8 +1,8 @@
 """CLI エントリポイント.
 
-BlackHole 2ch から音声をキャプチャし、選択したバックエンドで英語転写と日本語訳を生成する。
-バックエンドは TranslatedSegment をストリームし、`is_partial=True` (進行中) と
-`is_partial=False` (確定) を区別して出力する。
+BlackHole 2ch から音声をキャプチャし、選択したバックエンドで source 言語の転写と
+target 言語の訳を生成する。バックエンドは TranslatedSegment をストリームし、
+`is_partial=True` (進行中) と `is_partial=False` (確定) を区別して出力する。
 
 - 進行中セグメント (OpenAI バックエンドの delta): Rich Live で in-place 更新
 - 確定セグメント: append-only で永続表示 + ログ + 要約バッファ反映
@@ -12,8 +12,8 @@ BlackHole 2ch から音声をキャプチャし、選択したバックエンド
     openai  OpenAI gpt-realtime-translate (WebSocket). delta 単位で in-place 更新
 
 出力形式:
-    [mm:ss] <英語転写>
-    [mm:ss] <日本語訳>
+    [mm:ss] <source 転写>
+    [mm:ss] <target 訳>
 """
 
 from __future__ import annotations
@@ -31,6 +31,13 @@ from realtime_interpreter.audio import (
     DEVICE_NAME,
     END_SILENCE_MS,
     MAX_SEGMENT_SECONDS,
+)
+from realtime_interpreter.i18n import (
+    DEFAULT_SOURCE,
+    DEFAULT_TARGET,
+    LANGUAGES,
+    language_name,
+    normalize_language_code,
 )
 from realtime_interpreter.backends.base import (
     TranslatedSegment,
@@ -85,8 +92,9 @@ def _check_audio_output() -> None:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Low-latency EN→JA simultaneous interpreter. "
-            "Switchable backend: local MLX (Gemma 4) or OpenAI gpt-realtime-translate."
+            "Low-latency simultaneous interpreter. Default: English→Japanese. "
+            "Use --source-lang / --target-lang (aliases: --from / --to, -s / -t) "
+            "to change languages. Backends: local MLX (Gemma 4) or OpenAI gpt-realtime-translate."
         ),
     )
     parser.add_argument(
@@ -99,6 +107,35 @@ def _parse_args() -> argparse.Namespace:
         "--device",
         default=DEVICE_NAME,
         help=f"Audio input device name (default: {DEVICE_NAME!r})",
+    )
+
+    # 共通の言語切替フラグ. ISO 639-1 2文字コード.
+    parser.add_argument(
+        "--source-lang", "--from", "-s",
+        dest="source_lang",
+        default=DEFAULT_SOURCE,
+        metavar="CODE",
+        help=(
+            "Source (spoken) language ISO 639-1 code. "
+            "Affects prompt for mlx backend; input transcription is auto-detected on openai backend. "
+            f"(default: {DEFAULT_SOURCE!r}). Aliases: --from, -s. Use --list-languages."
+        ),
+    )
+    parser.add_argument(
+        "--target-lang", "--to", "-t",
+        dest="target_lang",
+        default=DEFAULT_TARGET,
+        metavar="CODE",
+        help=(
+            "Target (translation) language ISO 639-1 code. "
+            "Affects prompt for mlx backend and audio.output.language for openai backend. "
+            f"(default: {DEFAULT_TARGET!r}). Aliases: --to, -t. Use --list-languages."
+        ),
+    )
+    parser.add_argument(
+        "--list-languages",
+        action="store_true",
+        help="List known language codes and exit",
     )
 
     mlx_group = parser.add_argument_group("mlx backend")
@@ -211,10 +248,30 @@ def _print_model_presets() -> None:
     print("(must contain '/'). Set REALTIME_INTERPRETER_MODEL env var to change default.")
 
 
+def _print_languages() -> None:
+    print("Known language codes (ISO 639-1):")
+    print()
+    for code, name in LANGUAGES.items():
+        marker = ""
+        if code == DEFAULT_SOURCE:
+            marker = " (default source)"
+        if code == DEFAULT_TARGET:
+            marker += " (default target)"
+        print(f"  {code:<4} {name}{marker}")
+    print()
+    print("Pass any code (incl. those not listed) via --source-lang/--from/-s")
+    print("or --target-lang/--to/-t. Unknown codes are passed to the backend as-is.")
+    print()
+    print("Note: gpt-realtime-translate supports ~13 target languages.")
+    print("Use the openai backend with an unsupported target → API will error.")
+
+
 def _build_backend(
     args: argparse.Namespace,
 ) -> tuple[TranslationBackend, Summarizer | OpenAIChatSummarizer | None]:
     summary_enabled = args.summary_interval_seconds > 0
+    src = normalize_language_code(args.source_lang)
+    tgt = normalize_language_code(args.target_lang)
 
     if args.backend == "mlx":
         if args.end_silence_ms <= 0:
@@ -222,7 +279,11 @@ def _build_backend(
         if args.max_segment_seconds <= 0:
             raise SystemExit("error: --max-segment-seconds must be positive")
 
-        translator = GemmaAudioTranslator(model=args.model)
+        translator = GemmaAudioTranslator(
+            model=args.model,
+            source_lang=src,
+            target_lang=tgt,
+        )
         print(f"Loading {translator.model_id} (this may take a minute)...", file=sys.stderr)
         translator.load()
         print("Model loaded.", file=sys.stderr)
@@ -234,7 +295,11 @@ def _build_backend(
             end_silence_ms=args.end_silence_ms,
             max_segment_seconds=args.max_segment_seconds,
         )
-        summarizer = Summarizer(translator) if summary_enabled else None
+        summarizer = (
+            Summarizer(translator, source_lang=src, target_lang=tgt)
+            if summary_enabled
+            else None
+        )
         return backend, summarizer
 
     if args.backend == "openai":
@@ -248,9 +313,15 @@ def _build_backend(
             model=args.openai_model,
             turn_debounce_ms=args.openai_debounce_ms,
             max_segment_seconds=args.openai_max_segment_seconds,
+            source_lang=src,
+            target_lang=tgt,
         )
         summarizer = (
-            OpenAIChatSummarizer(model=args.openai_summary_model)
+            OpenAIChatSummarizer(
+                model=args.openai_summary_model,
+                source_lang=src,
+                target_lang=tgt,
+            )
             if summary_enabled
             else None
         )
@@ -265,9 +336,13 @@ def _emit_settings(args: argparse.Namespace) -> None:
         if args.summary_interval_seconds > 0
         else "off"
     )
+    src = normalize_language_code(args.source_lang)
+    tgt = normalize_language_code(args.target_lang)
+    lang_label = f"{language_name(src)} ({src}) → {language_name(tgt)} ({tgt})"
     if args.backend == "mlx":
         print(
             f"Backend: mlx | "
+            f"Lang: {lang_label} | "
             f"VAD: end_silence={args.end_silence_ms}ms, "
             f"max_segment={args.max_segment_seconds}s | "
             f"summary={summary_str}",
@@ -287,6 +362,7 @@ def _emit_settings(args: argparse.Namespace) -> None:
             summary_label = "off"
         print(
             f"Backend: openai ({args.openai_model}) | "
+            f"Lang: {lang_label} | "
             f"debounce={args.openai_debounce_ms}ms, "
             f"max_segment={max_seg_str} | "
             f"summary={summary_label}",
@@ -297,7 +373,7 @@ def _emit_settings(args: argparse.Namespace) -> None:
 def _submit_summary_task(
     executor: ThreadPoolExecutor,
     summarizer: Summarizer | OpenAIChatSummarizer,
-    english_buffer: list[tuple[float, str]],
+    source_buffer: list[tuple[float, str]],
     since_offset: float,
     until_offset: float,
     duration_seconds: int,
@@ -310,14 +386,14 @@ def _submit_summary_task(
     ワーカー側で完了時に renderer / session_logger に直接書き込む.
     Rich Live は内部ロックで thread-safe なので別スレッドからの emit_summary は問題ない。
     """
-    items = [text for ts, text in english_buffer if ts >= since_offset]
+    items = [text for ts, text in source_buffer if ts >= since_offset]
     if not items:
         return
-    en_concat = " ".join(items)
+    src_concat = " ".join(items)
 
     def _worker() -> None:
         try:
-            summary = summarizer.summarize(en_concat, duration_seconds)
+            summary = summarizer.summarize(src_concat, duration_seconds)
         except Exception:
             logger.exception("summary task failed")
             return
@@ -335,6 +411,9 @@ def main() -> None:
     args = _parse_args()
     if args.list_models:
         _print_model_presets()
+        return
+    if args.list_languages:
+        _print_languages()
         return
 
     logging.basicConfig(
@@ -362,7 +441,8 @@ def main() -> None:
     _emit_settings(args)
     print("", file=sys.stderr)
 
-    english_buffer: list[tuple[float, str]] = []
+    # 要約用バッファ: 過去 N 秒の source 言語転写を (offset, text) で保持
+    source_buffer: list[tuple[float, str]] = []
     summary_last_offset = 0.0
     summary_interval = float(args.summary_interval_seconds)
 
@@ -381,15 +461,15 @@ def main() -> None:
                 ts = format_offset(seg.start_offset_seconds)
                 if seg.is_partial:
                     # in-place 更新. ログ・要約バッファには触らない。
-                    renderer.update_current(ts, seg.english, seg.japanese)
+                    renderer.update_current(ts, seg.source, seg.target)
                     continue
 
                 # 確定セグメント: 永続表示・ログ・要約バッファ反映
-                renderer.commit(ts, seg.english, seg.japanese)
-                session_logger.log_segment(ts, seg.english, seg.japanese)
-                if summarizer is not None and seg.english.strip():
-                    english_buffer.append(
-                        (seg.start_offset_seconds, seg.english.strip())
+                renderer.commit(ts, seg.source, seg.target)
+                session_logger.log_segment(ts, seg.source, seg.target)
+                if summarizer is not None and seg.source.strip():
+                    source_buffer.append(
+                        (seg.start_offset_seconds, seg.source.strip())
                     )
 
                 segment_end = seg.start_offset_seconds + seg.duration_seconds
@@ -402,7 +482,7 @@ def main() -> None:
                     _submit_summary_task(
                         summary_executor,
                         summarizer,
-                        list(english_buffer),  # worker に渡すスナップショット
+                        list(source_buffer),  # worker に渡すスナップショット
                         summary_last_offset,
                         segment_end,
                         int(summary_interval),
@@ -411,8 +491,8 @@ def main() -> None:
                     )
                     summary_last_offset = segment_end
                     cutoff = segment_end - summary_interval * 2
-                    english_buffer[:] = [
-                        (ts_, t) for ts_, t in english_buffer if ts_ >= cutoff
+                    source_buffer[:] = [
+                        (ts_, t) for ts_, t in source_buffer if ts_ >= cutoff
                     ]
 
                 renderer.update_status("● Listening...")

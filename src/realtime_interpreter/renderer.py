@@ -120,8 +120,8 @@ class StreamingRenderer:
         self._console = Console()
         # 進行中セグメント. None なら表示なし
         self._current_ts: str | None = None
-        self._current_en: str = ""
-        self._current_ja: str = ""
+        self._current_source: str = ""
+        self._current_target: str = ""
         self._status: str = ""
         self._live: Live | None = None
 
@@ -142,24 +142,24 @@ class StreamingRenderer:
 
     def _render(self) -> Group:
         items: list[Text] = []
-        if self._current_ts is not None and (self._current_en or self._current_ja):
-            # 進行中セグメント. [mm:ss]=緑 / 英語=グレー斜体 / 日本語=白斜体
+        if self._current_ts is not None and (self._current_source or self._current_target):
+            # 進行中セグメント. [mm:ss]=緑 / source=グレー斜体 / target=白斜体
             # Rich の word-wrap は CJK ランを 1 単語扱いして [mm:ss] 直後で折る挙動が
             # あるため、こちらで cell-aware に折り返して multi-line Text を渡す。
             # Rich はその multi-line をそのまま描画し追加の wrap はしない。
             # → Live の行数追跡も正確で、ターミナル末尾でも凍結しない。
             max_width = self._console.size.width
-            if self._current_en:
+            if self._current_source:
                 items.extend(
                     _timestamped_wrapped_rows(
-                        self._current_ts, self._current_en,
+                        self._current_ts, self._current_source,
                         body_style="dim italic", max_width=max_width,
                     )
                 )
-            if self._current_ja:
+            if self._current_target:
                 items.extend(
                     _timestamped_wrapped_rows(
-                        self._current_ts, self._current_ja,
+                        self._current_ts, self._current_target,
                         body_style="italic", max_width=max_width,
                     )
                 )
@@ -171,14 +171,14 @@ class StreamingRenderer:
         if self._live is not None:
             self._live.update(self._render())
 
-    def update_current(self, ts: str, english: str, japanese: str) -> None:
+    def update_current(self, ts: str, source: str, target: str) -> None:
         """進行中セグメントの状態を上書き (delta 受信ごとに呼ぶ)."""
         self._current_ts = ts
-        self._current_en = english
-        self._current_ja = japanese
+        self._current_source = source
+        self._current_target = target
         self._refresh()
 
-    def commit(self, ts: str, english: str, japanese: str) -> None:
+    def commit(self, ts: str, source: str, target: str) -> None:
         """ターン確定: 永続表示エリアに昇格させ、進行中をクリア.
 
         Live の上に console.print することで、確定した行が Live エリアの上に
@@ -191,25 +191,25 @@ class StreamingRenderer:
         - `soft_wrap=True` で Rich の word-wrap を無効化し、行折り返しは
           ターミナル任せにする (ASCII↔CJK 境界での Rich の早期折りを回避)
         """
-        en = english.strip()
-        ja = japanese.strip()
-        if en:
-            # [mm:ss]=緑 / 英語転写=グレー の append-only 出力
+        src = source.strip()
+        tgt = target.strip()
+        if src:
+            # [mm:ss]=緑 / source 転写=グレー の append-only 出力
             self._console.print(
-                _timestamped_line(ts, en, body_style="dim"),
+                _timestamped_line(ts, src, body_style="dim"),
                 soft_wrap=True,
             )
-        if ja:
-            # [mm:ss]=緑 / 日本語訳=通常色
+        if tgt:
+            # [mm:ss]=緑 / target 訳=通常色
             self._console.print(
-                _timestamped_line(ts, ja, body_style=""),
+                _timestamped_line(ts, tgt, body_style=""),
                 soft_wrap=True,
             )
-        if en or ja:
+        if src or tgt:
             self._console.print("")
         self._current_ts = None
-        self._current_en = ""
-        self._current_ja = ""
+        self._current_source = ""
+        self._current_target = ""
         self._refresh()
 
     def emit_summary(self, ts: str, text: str) -> None:

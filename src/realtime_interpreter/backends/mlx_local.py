@@ -59,7 +59,7 @@ class LocalMLXBackend:
             yield TranslatedSegment(
                 start_offset_seconds=segment.start_offset_seconds,
                 duration_seconds=segment.duration_seconds,
-                english=result.english,
-                japanese=result.japanese,
+                source=result.source,
+                target=result.target,
                 is_partial=False,
             )

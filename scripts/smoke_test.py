@@ -68,8 +68,8 @@ def main() -> None:
     print("translating...")
     result = translator.translate(audio.astype(np.float32))
     print(f"\n--- {result.latency_seconds:.2f}s ---")
-    print(f"EN: {result.english}")
-    print(f"JA: {result.japanese}")
+    print(f"SRC: {result.source}")
+    print(f"TGT: {result.target}")
     print("---")
 
 
