@@ -69,14 +69,45 @@ DEFAULT_SUMMARY_INTERVAL_SECONDS = 60
 SUPPORTED_BACKENDS = ("mlx", "openai")
 
 
-def _check_audio_output() -> None:
-    """起動時に音声出力先を確認."""
-    default_out = sd.default.device[1]
-    device_name = sd.query_devices(default_out)["name"]
-    print(f"Output device: {device_name}", file=sys.stderr)
-    if "複数出力" not in device_name and "multi" not in device_name.lower():
+def _list_devices() -> None:
+    """`--device` に指定できる入力デバイス (max_input_channels > 0) のみ表示する."""
+    devices = sd.query_devices()
+    default_in = sd.default.device[0]
+    print("Input devices selectable via --device (index: name [in channels]):")
+    print()
+    found = False
+    for index, dev in enumerate(devices):
+        if dev["max_input_channels"] <= 0:
+            continue  # 出力専用デバイスは --device に指定できないので除外
+        found = True
+        marker = "  <- default-in" if index == default_in else ""
         print(
-            "⚠ Please switch macOS output to a Multi-Output Device including BlackHole 2ch.",
+            f"  {index:>2}: {dev['name']} [in={dev['max_input_channels']}]{marker}"
+        )
+    if not found:
+        print("  (no input-capable devices found)")
+    print()
+    print("Pass a device name (substring match) to --device to choose the capture input.")
+    print("On macOS, capture system audio via BlackHole 2ch (a Multi-Output Device routes")
+    print("speaker audio into BlackHole so this program can read it as an input).")
+
+
+def _check_input_device(device_name: str) -> None:
+    """起動時にキャプチャ対象の入力デバイスを表示し、必要なら出力切替を促す.
+
+    本プログラムから見ると BlackHole はシステム音声を受け取る「入力 (マイク)」。
+    一方 macOS 側ではスピーカー出力を Multi-Output Device 経由で BlackHole に
+    流す必要があるため、現在の **出力先** が Multi-Output でない場合は切替を促す。
+    """
+    # 現在 macOS が使っている出力デバイス (BlackHole にルーティングされているべき対象)
+    default_out = sd.default.device[1]
+    output_name = sd.query_devices(default_out)["name"]
+    print(f"Input device: {device_name}", file=sys.stderr)
+    if "複数出力" not in output_name and "multi" not in output_name.lower():
+        print(
+            f"⚠ Current system output is {output_name!r}. "
+            "Switch macOS output to a Multi-Output Device including BlackHole 2ch "
+            "so audio reaches this program. (Use --no-device-check to skip this prompt.)",
             file=sys.stderr,
         )
         try:
@@ -102,6 +133,19 @@ def _parse_args() -> argparse.Namespace:
         choices=SUPPORTED_BACKENDS,
         default="mlx",
         help="Translation backend (default: mlx)",
+    )
+    parser.add_argument(
+        "--list-devices",
+        action="store_true",
+        help="List available audio devices and exit",
+    )
+    parser.add_argument(
+        "--no-device-check",
+        action="store_true",
+        help=(
+            "Skip the startup output-device check / Multi-Output prompt. "
+            "Use when you manage audio routing yourself."
+        ),
     )
     parser.add_argument(
         "--device",
@@ -415,6 +459,9 @@ def main() -> None:
     if args.list_languages:
         _print_languages()
         return
+    if args.list_devices:
+        _list_devices()
+        return
 
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.WARNING,
@@ -426,7 +473,10 @@ def main() -> None:
         print("error: --summary-interval-seconds must be >= 0", file=sys.stderr)
         sys.exit(2)
 
-    _check_audio_output()
+    if args.no_device_check:
+        print(f"Input device: {args.device}", file=sys.stderr)
+    else:
+        _check_input_device(args.device)
 
     try:
         backend, summarizer = _build_backend(args)

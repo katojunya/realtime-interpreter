@@ -49,7 +49,7 @@ INPUT_TRANSCRIPTION_MODEL = "gpt-realtime-whisper"
 # 切ってから本文を続ける) で訳すことがあるため、文単位での即時 commit を行うと
 # EN/JA の対応関係が崩れる. そのため発話の切れ目 (= 翻訳がひと段落して delta が
 # 来なくなった瞬間) を唯一の commit トリガとし、対応の整合を優先する。
-TURN_DEBOUNCE_MS = 300
+TURN_DEBOUNCE_MS = 800
 
 # 連続発話 (ポーズなし) で 1 チャンクが肥大化するのを防ぐ強制 commit 上限.
 # この秒数に達したら delta が継続中でも強制的に commit する.
@@ -61,6 +61,20 @@ OPENAI_MAX_SEGMENT_SECONDS = 8.0
 # 現在は EN/JA の切れ目が一致しないため commit には使用しない。
 JA_SENTENCE_ENDS = "。？！?!"
 EN_SENTENCE_ENDS = ".!?"
+
+# debounce が早く commit したあとに遅れて届いた文末記号が、次セグメントの先頭に
+# 流れ込むことがある (例: "[07:43] 。18年..." の先頭の "。"). これを除去するための
+# 行頭文字セット. 半角/全角の句読点・記号 + 各種空白。
+_LEADING_PUNCT = " 　.,。、!?！？;；:：…・\t\n"
+
+
+def _clean_leading(text: str) -> str:
+    """先頭の句読点・記号・空白を除去する.
+
+    本来は前セグメントの末尾に属するはずだった記号が、ストリームの遅延で
+    次セグメントの先頭に来てしまったものを取り除く。中間・末尾の記号は保持。
+    """
+    return text.lstrip(_LEADING_PUNCT)
 
 
 def _first_complete_sentence_end_ja(text: str) -> int | None:
@@ -573,12 +587,17 @@ class OpenAIRealtimeBackend:
         """Caller must hold `_pending_lock`. delta 受信ごとに現在状態を partial で push."""
         assert self._pending_turn is not None
         turn = self._pending_turn
+        src = _clean_leading(turn.source())
+        tgt = _clean_leading(turn.target())
+        # 句読点のみ (clean 後に両方空) のセグメントは表示しない
+        if not src and not tgt:
+            return
         duration = max(0.0, turn.last_activity_at - turn.started_at)
         seg = TranslatedSegment(
             start_offset_seconds=turn.start_offset_seconds,
             duration_seconds=duration,
-            source=turn.source(),
-            target=turn.target(),
+            source=src,
+            target=tgt,
             is_partial=True,
         )
         self._segment_queue.put(seg)
@@ -587,16 +606,21 @@ class OpenAIRealtimeBackend:
         """Caller must hold `_pending_lock`. debounce 経過で final として確定."""
         assert self._pending_turn is not None
         turn = self._pending_turn
+        src = _clean_leading(turn.source())
+        tgt = _clean_leading(turn.target())
+        self._pending_turn = None
+        # 句読点のみ (clean 後に両方空) のセグメントは表示しない
+        if not src and not tgt:
+            return
         duration = max(0.0, turn.last_activity_at - turn.started_at)
         seg = TranslatedSegment(
             start_offset_seconds=turn.start_offset_seconds,
             duration_seconds=duration,
-            source=turn.source(),
-            target=turn.target(),
+            source=src,
+            target=tgt,
             is_partial=False,
         )
         self._segment_queue.put(seg)
-        self._pending_turn = None
 
 
 def _summarize_event(event: dict, max_field_len: int = 200) -> str:

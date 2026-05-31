@@ -31,7 +31,7 @@ VAD で検出された発話セグメント単位で、確定した結果を 2 �
 
 ```
 BlackHole 2ch
-  → SpeechSegmentCapture (Silero VAD で発話を区切る. 無音 300ms or 最大 8s で finalize)
+  → SpeechSegmentCapture (Silero VAD で発話を区切る. 無音 800ms or 最大 8s で finalize)
   → GemmaAudioTranslator (mlx-vlm + google/gemma-4-e4b-it 4bit)
        1 回の推論で "EN: ... / JA: ..." を生成
   → 確定したセグメント単位で append-only 出力
@@ -56,16 +56,16 @@ BlackHole 2ch
   → 確定行を append-only に永続表示 + ログ
 ```
 
-**ストリーミング表示 + 発話単位の commit (alignment-first)**: delta が届くたびに英語 + 日本語の 2 行が in-place で伸びていきます (Rich Live)。**delta が一定時間 (既定 300ms) 来なくなった時点でその発話を確定** として上に積み上げ、次の発話を新しい in-progress 行として表示します。
+**ストリーミング表示 + 発話単位の commit (alignment-first)**: delta が届くたびに英語 + 日本語の 2 行が in-place で伸びていきます (Rich Live)。**delta が一定時間 (既定 800ms) 来なくなった時点でその発話を確定** として上に積み上げ、次の発話を新しい in-progress 行として表示します。
 
 文単位 (JA `。` / EN `.`) でリアルタイム commit する設計も試したが、本モデルは **EN 1 文を JA 複数文 (例: 挨拶を独立文として切る) で訳す** ことがあり、文単位 commit を行うと EN1 ↔ JA1 だけがペアになって後続がズレるため、現状は debounce ベースに統一している。
 
-`--openai-debounce-ms` で発話の切れ目検出感度を調整できます (既定 300):
+`--openai-debounce-ms` で発話の切れ目検出感度を調整できます (既定 800):
 
 | 値 | トレードオフ |
 |---|---|
-| 200〜300 (既定 300) | レスポンス重視. ただし翻訳途中で commit して EN/JA がズレる可能性あり |
-| 500〜1000 | バランス. 通常の発話間ポーズで commit |
+| 200〜500 | レスポンス重視. ただし翻訳途中で commit して EN/JA がズレる可能性あり |
+| 800 (既定) | バランス. 通常の発話間ポーズで commit |
 | 1500〜2500 | より長い文・段落単位で commit. 確実に対応が取れるが表示は遅延する |
 
 `--openai-max-segment-seconds` で **連続発話時の強制 commit 上限** を設定できます (既定 8.0). ポーズなしの長台詞でも N 秒で 1 チャンクに切り分けます:
@@ -127,7 +127,9 @@ OpenAI バックエンドは **WebSocket ベースのストリーミング** で
 | フラグ | 説明 | 既定 | 対象 |
 |---|---|---|---|
 | `--backend` | `mlx` or `openai` | `mlx` | 共通 |
-| `--device` | 入力デバイス名 | `BlackHole 2ch` | 共通 |
+| `--device` | 入力デバイス名 (部分一致) | `BlackHole 2ch` | 共通 |
+| `--list-devices` | オーディオデバイス一覧を表示して終了 | — | 共通 |
+| `--no-device-check` | 起動時の出力デバイス確認プロンプトをスキップ (ルーティングを自分で管理する場合) | (off) | 共通 |
 | `--source-lang` / `--from` / `-s` | 音声の言語 (ISO 639-1) | `en` | 共通 |
 | `--target-lang` / `--to` / `-t` | 翻訳先の言語 (ISO 639-1) | `ja` | 共通 |
 | `--list-languages` | 既知の言語コードを表示して終了 | — | 共通 |
@@ -136,7 +138,7 @@ OpenAI バックエンドは **WebSocket ベースのストリーミング** で
 | `--debug` | 詳細ログを stderr に出す | (off) | 共通 |
 | `--model` | モデルエイリアス or 完全な HuggingFace ID | `e4b` | mlx |
 | `--list-models` | プリセット一覧を表示して終了 | — | mlx |
-| `--end-silence-ms` | この長さの無音で発話セグメントを区切る | `300` | mlx |
+| `--end-silence-ms` | この長さの無音で発話セグメントを区切る | `800` | mlx |
 | `--max-segment-seconds` | 連続発話時のセグメント最大長 (秒) | `8.0` | mlx |
 | `--openai-model` | Realtime モデル ID | `gpt-realtime-translate` | openai |
 
@@ -258,9 +260,9 @@ uv run realtime-interpreter --end-silence-ms 250 --max-segment-seconds 6
 
 | 設定例 | 体感 |
 |---|---|
-| `--end-silence-ms 500 --max-segment-seconds 15` | 文単位でしっかり区切られる. 翻訳品質優先 |
-| `--end-silence-ms 300 --max-segment-seconds 8` (既定) | レスポンス重視のバランス型 |
-| `--end-silence-ms 300 --max-segment-seconds 8` | やや早めに区切る. バランス型 |
+| `--end-silence-ms 800 --max-segment-seconds 8` (既定) | 文単位でしっかり区切られる. 翻訳品質優先 |
+| `--end-silence-ms 500 --max-segment-seconds 8` | やや早めに区切る. バランス型 |
+| `--end-silence-ms 300 --max-segment-seconds 6` | レスポンス重視. 文が途中で切れやすくなる |
 | `--end-silence-ms 200 --max-segment-seconds 5` | 細切れ. 反応速度優先, 文が途中で切れることがある |
 
 ### その他のチューニング (ソース直書き)
@@ -303,7 +305,7 @@ uv run pytest
 | モデルロード (キャッシュ済) | 約 2.6 秒 |
 | 5.86 秒音声 → EN+JA 出力 | 約 1.0 秒 |
 
-実機での体感レイテンシは「発話終了 (無音 300ms 検知) + 推論 (発話長に応じて 0.5〜2 秒)」で、目安として **発話終了から 1〜3 秒で画面に表示** されます。
+実機での体感レイテンシは「発話終了 (無音 800ms 検知) + 推論 (発話長に応じて 0.5〜2 秒)」で、目安として **発話終了から 1.5〜3 秒で画面に表示** されます。
 
 ## 料金の目安
 
