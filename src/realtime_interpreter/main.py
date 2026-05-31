@@ -157,18 +157,36 @@ def _check_input_device(device_name: str) -> None:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
+    # mlx バックエンドは macOS (Apple Silicon) 専用. Windows では mlx 関連オプションを
+    # 一切登録しない (= --help に出ない & 渡すと "unrecognized arguments" でエラー)。
+    mlx_available = not _is_windows()
+
+    if mlx_available:
+        description = (
             "Low-latency simultaneous interpreter. Default: English→Japanese. "
             "Use --source-lang / --target-lang (aliases: --from / --to, -s / -t) "
             "to change languages. Backends: local MLX (Gemma 4) or OpenAI gpt-realtime-translate."
-        ),
-    )
+        )
+        backend_choices = SUPPORTED_BACKENDS
+        backend_default = "mlx"
+        backend_help = "Translation backend (default: mlx)"
+    else:
+        description = (
+            "Low-latency simultaneous interpreter (Windows: OpenAI backend only). "
+            "Default: English→Japanese. Use --source-lang / --target-lang "
+            "(aliases: --from / --to, -s / -t) to change languages."
+        )
+        # Windows では openai のみ. mlx は選択肢から除外する。
+        backend_choices = ("openai",)
+        backend_default = "openai"
+        backend_help = "Translation backend (Windows: openai only)"
+
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "--backend",
-        choices=SUPPORTED_BACKENDS,
-        default="mlx",
-        help="Translation backend (default: mlx)",
+        choices=backend_choices,
+        default=backend_default,
+        help=backend_help,
     )
     parser.add_argument(
         "--list-devices",
@@ -218,40 +236,42 @@ def _parse_args() -> argparse.Namespace:
         help="List known language codes and exit",
     )
 
-    mlx_group = parser.add_argument_group("mlx backend")
-    mlx_group.add_argument(
-        "--model",
-        default=None,
-        help=(
-            f"[mlx] Model alias ({'/'.join(MODEL_PRESETS.keys())}) or full HuggingFace ID. "
-            f"Default: env REALTIME_INTERPRETER_MODEL or {DEFAULT_ALIAS!r}. "
-            "Use --list-models to see all presets."
-        ),
-    )
-    mlx_group.add_argument(
-        "--list-models",
-        action="store_true",
-        help="[mlx] List available model presets and exit",
-    )
-    mlx_group.add_argument(
-        "--end-silence-ms",
-        type=int,
-        default=END_SILENCE_MS,
-        help=(
-            "[mlx] Silence (ms) that ends a speech segment. "
-            "Lower = smaller chunks, faster output, more risk of mid-sentence cuts. "
-            f"(default: {END_SILENCE_MS})"
-        ),
-    )
-    mlx_group.add_argument(
-        "--max-segment-seconds",
-        type=float,
-        default=MAX_SEGMENT_SECONDS,
-        help=(
-            "[mlx] Hard cap (seconds) for a single segment when there is no silence. "
-            f"Lower = smaller chunks for continuous speech. (default: {MAX_SEGMENT_SECONDS})"
-        ),
-    )
+    # mlx 関連オプションは macOS のみ登録. Windows では表示も受付もしない。
+    if mlx_available:
+        mlx_group = parser.add_argument_group("mlx backend")
+        mlx_group.add_argument(
+            "--model",
+            default=None,
+            help=(
+                f"[mlx] Model alias ({'/'.join(MODEL_PRESETS.keys())}) or full HuggingFace ID. "
+                f"Default: env REALTIME_INTERPRETER_MODEL or {DEFAULT_ALIAS!r}. "
+                "Use --list-models to see all presets."
+            ),
+        )
+        mlx_group.add_argument(
+            "--list-models",
+            action="store_true",
+            help="[mlx] List available model presets and exit",
+        )
+        mlx_group.add_argument(
+            "--end-silence-ms",
+            type=int,
+            default=END_SILENCE_MS,
+            help=(
+                "[mlx] Silence (ms) that ends a speech segment. "
+                "Lower = smaller chunks, faster output, more risk of mid-sentence cuts. "
+                f"(default: {END_SILENCE_MS})"
+            ),
+        )
+        mlx_group.add_argument(
+            "--max-segment-seconds",
+            type=float,
+            default=MAX_SEGMENT_SECONDS,
+            help=(
+                "[mlx] Hard cap (seconds) for a single segment when there is no silence. "
+                f"Lower = smaller chunks for continuous speech. (default: {MAX_SEGMENT_SECONDS})"
+            ),
+        )
 
     openai_group = parser.add_argument_group("openai backend")
     openai_group.add_argument(
@@ -296,9 +316,9 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_SUMMARY_INTERVAL_SECONDS,
         help=(
-            "Generate a Japanese summary of the last N seconds of English transcription. "
-            "0 to disable. Requires the mlx backend to be available "
-            "(local Gemma 4 used as summarizer). "
+            "Generate a periodic summary (target language) of the last N seconds. "
+            "0 to disable. mlx backend uses local Gemma 4; openai backend uses "
+            "Chat Completions (--openai-summary-model). "
             f"(default: {DEFAULT_SUMMARY_INTERVAL_SECONDS})"
         ),
     )
@@ -501,7 +521,8 @@ def _submit_summary_task(
 
 def main() -> None:
     args = _parse_args()
-    if args.list_models:
+    # --list-models は mlx 専用フラグ. Windows では未登録なので getattr で安全に参照。
+    if getattr(args, "list_models", False):
         _print_model_presets()
         return
     if args.list_languages:
