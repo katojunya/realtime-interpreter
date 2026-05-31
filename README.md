@@ -101,7 +101,8 @@ BlackHole 2ch
 - Python 3.11〜3.13
 - [uv](https://docs.astral.sh/uv/)
 - OpenAI API キー
-- **追加ソフト不要** — システム音声は WASAPI ループバックで取り込みます (管理者権限・仮想オーディオドライバ不要)
+- **追加ソフト不要** — システム音声は WASAPI ループバックで取り込みます (管理者権限・仮想オーディオドライバ不要). `uv sync` で [PyAudioWPatch](https://github.com/s0d3s/PyAudioWPatch) (loopback 対応の PyAudio フォーク) が自動インストールされます
+- VDI (リモートデスクトップ等の「リモート オーディオ」) でも動作確認済み
 
 > mlx バックエンド (ローカル Gemma 4) は Apple Silicon 専用のため Windows では使えません。Windows では `--backend openai` のみ利用可能です。
 

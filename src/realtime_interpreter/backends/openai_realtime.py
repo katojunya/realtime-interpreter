@@ -132,30 +132,63 @@ def _is_windows() -> bool:
     return sys.platform == "win32"
 
 
-def _resolve_output_device_for_loopback(
-    name: str | None, sd_module: ModuleType
-) -> int:
-    """WASAPI loopback 用に「出力デバイス」を解決する (Windows).
+def _to_mono(samples: np.ndarray) -> np.ndarray:
+    """インターリーブ済みステレオ (N, 2) または 1 次元をモノラル float32 に変換."""
+    if samples.ndim == 2:
+        return np.mean(samples, axis=1).astype(np.float32)
+    return samples.astype(np.float32)
 
-    - name=None or 既定デバイス名(DEVICE_NAME) のとき: 既定の出力デバイスを採用
-      (= ユーザが今聞いているスピーカー/ヘッドホンの音をそのまま loopback 録音)
-    - name 指定時: 出力チャンネルを持つデバイスを部分一致で検索
+
+def _resample_linear(mono: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """線形補間でサンプルレート変換する (依存追加なし).
+
+    WASAPI loopback はデバイスのネイティブレート (例 44100Hz) でしか録れないが、
+    OpenAI Realtime は 24kHz PCM16 を要求するため、送信前にここでダウンサンプルする。
+    音声認識用途では線形補間で十分な品質。
     """
-    devices = sd_module.query_devices()
-    # 既定値 (BlackHole) のままか未指定なら、システム既定の出力を使う
-    if not name or name == DEVICE_NAME:
-        default_out = sd_module.default.device[1]
-        if default_out is None or default_out < 0:
-            raise RuntimeError("No default output device found for WASAPI loopback.")
-        return int(default_out)
-    for index, device in enumerate(devices):
-        if name in device["name"] and device["max_output_channels"] > 0:
-            return index
-    available = [
-        d["name"] for d in devices if d["max_output_channels"] > 0
-    ]
+    if src_rate == dst_rate or mono.size == 0:
+        return mono.astype(np.float32, copy=False)
+    n_out = int(round(mono.size * dst_rate / src_rate))
+    if n_out <= 0:
+        return np.zeros(0, dtype=np.float32)
+    x_old = np.arange(mono.size, dtype=np.float64)
+    x_new = np.linspace(0.0, mono.size - 1, n_out)
+    return np.interp(x_new, x_old, mono).astype(np.float32)
+
+
+def _find_loopback_device(pa, name: str | None):
+    """PyAudioWPatch で WASAPI loopback デバイスを解決する (Windows).
+
+    - name=None or 既定デバイス名(DEVICE_NAME) のとき: 既定出力に対応する loopback
+    - name 指定時: loopback デバイス名の部分一致
+
+    Returns: PyAudioWPatch の device info dict
+    """
+    import pyaudiowpatch as pyaudio
+
+    wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+    loopbacks = list(pa.get_loopback_device_info_generator())
+    if not loopbacks:
+        raise RuntimeError(
+            "No WASAPI loopback devices found. This environment cannot capture "
+            "system audio via loopback."
+        )
+
+    use_default = (not name) or (name == DEVICE_NAME)
+    if use_default:
+        default_out = pa.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
+        for lb in loopbacks:
+            if default_out["name"] in lb["name"]:
+                return lb
+        # 既定出力に対応する loopback が無ければ先頭を採用
+        return loopbacks[0]
+
+    for lb in loopbacks:
+        if name in lb["name"]:
+            return lb
+    available = [lb["name"] for lb in loopbacks]
     raise RuntimeError(
-        f"Output device '{name}' not found for loopback. Available outputs: {available}"
+        f"Loopback device matching {name!r} not found. Available: {available}"
     )
 
 
@@ -244,23 +277,24 @@ class OpenAIRealtimeBackend:
         self._recv_thread: threading.Thread | None = None
         self._emit_thread: threading.Thread | None = None
 
+        # Windows loopback (PyAudioWPatch) 用の状態
+        self._pa = None  # PyAudio インスタンス
+        self._capture_rate: int = OPENAI_SAMPLE_RATE  # 実際のキャプチャレート (Win は native)
+
         self._capture_start_monotonic: float | None = None
 
     # ---------------- context manager ----------------
 
     def __enter__(self) -> "OpenAIRealtimeBackend":
         self._capture_start_monotonic = time.monotonic()
-        # Windows は WASAPI loopback で「出力デバイス」を録音対象にする (案 1a+2a)。
-        # それ以外 (macOS/Linux) は従来どおり入力デバイスを開く。
-        if self._loopback:
-            self._device_index = _resolve_output_device_for_loopback(
-                self._device_name, self._sd
-            )
-        else:
-            self._device_index = _find_input_device(self._device_name, self._sd)
         self._open_websocket()
         self._send_session_config()
-        self._open_audio_stream()
+        # Windows は PyAudioWPatch で WASAPI loopback、それ以外は sounddevice 入力。
+        if self._loopback:
+            self._open_loopback_stream_windows()
+        else:
+            self._device_index = _find_input_device(self._device_name, self._sd)
+            self._open_audio_stream()
         self._start_threads()
         return self
 
@@ -273,10 +307,21 @@ class OpenAIRealtimeBackend:
         self._stop_event.set()
         try:
             if self._stream is not None:
-                self._stream.stop()
-                self._stream.close()
+                if self._loopback:
+                    # PyAudioWPatch stream
+                    self._stream.stop_stream()
+                    self._stream.close()
+                else:
+                    # sounddevice stream
+                    self._stream.stop()
+                    self._stream.close()
         except Exception:
             logger.debug("audio stream close failed", exc_info=True)
+        try:
+            if self._pa is not None:
+                self._pa.terminate()
+        except Exception:
+            logger.debug("pyaudio terminate failed", exc_info=True)
         try:
             if self._ws is not None:
                 self._ws.close()
@@ -337,27 +382,66 @@ class OpenAIRealtimeBackend:
         logger.debug("session.update sent: %s", json.dumps(msg))
 
     def _open_audio_stream(self) -> None:
-        extra_settings = None
-        if self._loopback:
-            # Windows: 出力デバイスを WASAPI loopback で「録音」として開く。
-            # これによりスピーカー再生中の音 (システム音声) をそのまま取り込める。
-            # 追加ソフト・管理者権限不要。
-            try:
-                extra_settings = self._sd.WasapiSettings(loopback=True)
-            except Exception as e:
-                raise RuntimeError(
-                    "WASAPI loopback is unavailable on this system "
-                    f"({e}). Loopback capture requires Windows + WASAPI host."
-                )
+        """macOS/Linux: sounddevice の入力ストリームを 24kHz で開く."""
+        self._capture_rate = OPENAI_SAMPLE_RATE
         self._stream = self._sd.InputStream(
             device=self._device_index,
             samplerate=OPENAI_SAMPLE_RATE,
             channels=2,
             dtype="float32",
             callback=self._audio_callback,
-            extra_settings=extra_settings,
         )
         self._stream.start()
+
+    def _open_loopback_stream_windows(self) -> None:
+        """Windows: PyAudioWPatch で WASAPI loopback ストリームを開く.
+
+        sounddevice は loopback 非対応のため PyAudioWPatch を使う。
+        デバイスのネイティブレート (例 44100Hz) でステレオ int16 を取得し、
+        コールバック内で mono 化 + 24kHz へリサンプルして _audio_queue に積む。
+        """
+        try:
+            import pyaudiowpatch as pyaudio
+        except ImportError as e:
+            raise RuntimeError(
+                f"PyAudioWPatch is required for Windows loopback capture but is not "
+                f"installed ({e}). Run `uv sync` on Windows to install it."
+            )
+
+        self._pa = pyaudio.PyAudio()
+        device = _find_loopback_device(self._pa, self._device_name)
+        self._capture_rate = int(device["defaultSampleRate"])
+        channels = int(device["maxInputChannels"])
+        self._loopback_channels = channels
+        logger.info(
+            "WASAPI loopback device: [%s] %s (channels=%d, rate=%d -> %d)",
+            device["index"], device["name"], channels,
+            self._capture_rate, OPENAI_SAMPLE_RATE,
+        )
+
+        def _pa_callback(in_data, frame_count, time_info, status):
+            try:
+                arr = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
+                if channels > 1:
+                    arr = arr.reshape(-1, channels)
+                mono = _to_mono(arr)
+                mono = _resample_linear(mono, self._capture_rate, OPENAI_SAMPLE_RATE)
+                if mono.size:
+                    self._audio_queue.put(mono)
+            except Exception:
+                logger.exception("loopback callback failed")
+            return (None, pyaudio.paContinue)
+
+        self._stream = self._pa.open(
+            format=pyaudio.paInt16,
+            channels=channels,
+            rate=self._capture_rate,
+            frames_per_buffer=1024,
+            input=True,
+            input_device_index=device["index"],
+            stream_callback=_pa_callback,
+        )
+        self._stream.start_stream()
 
     def _start_threads(self) -> None:
         self._send_thread = threading.Thread(
