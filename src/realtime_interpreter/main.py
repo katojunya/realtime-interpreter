@@ -43,7 +43,6 @@ from realtime_interpreter.backends.base import (
     TranslatedSegment,
     TranslationBackend,
 )
-from realtime_interpreter.backends.mlx_local import LocalMLXBackend
 from realtime_interpreter.backends.openai_realtime import (
     DEFAULT_OPENAI_MODEL,
     OPENAI_MAX_SEGMENT_SECONDS,
@@ -55,13 +54,12 @@ from realtime_interpreter.session_logger import SessionLogger, format_offset
 from realtime_interpreter.summarizer import (
     DEFAULT_OPENAI_SUMMARY_MODEL,
     OpenAIChatSummarizer,
-    Summarizer,
 )
-from realtime_interpreter.translator import (
-    DEFAULT_ALIAS,
-    MODEL_PRESETS,
-    GemmaAudioTranslator,
-)
+# NOTE: mlx バックエンド固有の import (LocalMLXBackend / GemmaAudioTranslator / Summarizer)
+# は _build_backend() の mlx 分岐内で遅延 import する。これにより mlx 未インストールの
+# Windows/Linux でも --backend openai が動く。
+# 定数 (DEVICE_NAME 等, MODEL_PRESETS, DEFAULT_ALIAS) は軽量なので下で参照する。
+from realtime_interpreter.translator import DEFAULT_ALIAS, MODEL_PRESETS
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +67,35 @@ DEFAULT_SUMMARY_INTERVAL_SECONDS = 60
 SUPPORTED_BACKENDS = ("mlx", "openai")
 
 
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
 def _list_devices() -> None:
-    """`--device` に指定できる入力デバイス (max_input_channels > 0) のみ表示する."""
+    """`--device` に指定できるデバイスを表示する.
+
+    - Windows: WASAPI loopback で「出力デバイス」を録音対象にするため、出力デバイスを列挙
+    - macOS/Linux: 入力デバイス (max_input_channels > 0) を列挙
+    """
     devices = sd.query_devices()
+    if _is_windows():
+        default_out = sd.default.device[1]
+        print("Output devices (WASAPI loopback capture targets) for --device:")
+        print()
+        found = False
+        for index, dev in enumerate(devices):
+            if dev["max_output_channels"] <= 0:
+                continue
+            found = True
+            marker = "  <- default-out (used when --device omitted)" if index == default_out else ""
+            print(f"  {index:>2}: {dev['name']} [out={dev['max_output_channels']}]{marker}")
+        if not found:
+            print("  (no output-capable devices found)")
+        print()
+        print("On Windows, system audio is captured via WASAPI loopback on an OUTPUT device.")
+        print("Omit --device to loopback the default speaker, or pass an output device name.")
+        return
+
     default_in = sd.default.device[0]
     print("Input devices selectable via --device (index: name [in channels]):")
     print()
@@ -93,13 +117,24 @@ def _list_devices() -> None:
 
 
 def _check_input_device(device_name: str) -> None:
-    """起動時にキャプチャ対象の入力デバイスを表示し、必要なら出力切替を促す.
+    """起動時にキャプチャ対象を表示し、必要なら設定を促す (platform 別)."""
+    if _is_windows():
+        # Windows は WASAPI loopback. 既定スピーカー (or 指定出力) の音を取り込む。
+        # 追加設定は不要なので、対象だけ表示して続行。
+        if not device_name or device_name == DEVICE_NAME:
+            target = "default output device (speaker)"
+        else:
+            target = repr(device_name)
+        print(
+            f"Capture (WASAPI loopback): {target}. "
+            "Play audio from any app to translate it.",
+            file=sys.stderr,
+        )
+        return
 
-    本プログラムから見ると BlackHole はシステム音声を受け取る「入力 (マイク)」。
-    一方 macOS 側ではスピーカー出力を Multi-Output Device 経由で BlackHole に
-    流す必要があるため、現在の **出力先** が Multi-Output でない場合は切替を促す。
-    """
-    # 現在 macOS が使っている出力デバイス (BlackHole にルーティングされているべき対象)
+    # macOS/Linux: BlackHole 等の入力デバイスを開く。
+    # macOS ではスピーカー出力を Multi-Output Device 経由で BlackHole に流す必要があるため、
+    # 現在の出力先が Multi-Output でなければ切替を促す。
     default_out = sd.default.device[1]
     output_name = sd.query_devices(default_out)["name"]
     print(f"Input device: {device_name}", file=sys.stderr)
@@ -110,13 +145,14 @@ def _check_input_device(device_name: str) -> None:
             "so audio reaches this program. (Use --no-device-check to skip this prompt.)",
             file=sys.stderr,
         )
-        try:
-            subprocess.run(
-                ["open", "x-apple.systempreferences:com.apple.Sound-Settings.extension"],
-                check=False,
-            )
-        except Exception:
-            pass
+        if sys.platform == "darwin":
+            try:
+                subprocess.run(
+                    ["open", "x-apple.systempreferences:com.apple.Sound-Settings.extension"],
+                    check=False,
+                )
+            except Exception:
+                pass
         input("  Press Enter when ready: ")
 
 
@@ -322,6 +358,18 @@ def _build_backend(
             raise SystemExit("error: --end-silence-ms must be positive")
         if args.max_segment_seconds <= 0:
             raise SystemExit("error: --max-segment-seconds must be positive")
+
+        # mlx 系は macOS 専用依存. ここで遅延 import (Windows では到達しない)。
+        try:
+            from realtime_interpreter.backends.mlx_local import LocalMLXBackend
+            from realtime_interpreter.summarizer import Summarizer
+            from realtime_interpreter.translator import GemmaAudioTranslator
+        except ImportError as e:
+            raise SystemExit(
+                f"error: mlx backend unavailable ({e}). "
+                "The mlx backend requires macOS (Apple Silicon) with mlx-vlm installed. "
+                "On Windows/Linux use --backend openai."
+            )
 
         translator = GemmaAudioTranslator(
             model=args.model,

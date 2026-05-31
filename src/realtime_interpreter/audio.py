@@ -19,7 +19,6 @@ from types import ModuleType, TracebackType
 from typing import Iterator
 
 import numpy as np
-from silero_vad_lite import SileroVAD
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +84,11 @@ class SpeechSegmentCapture:
         self._raw_queue: queue.Queue[np.ndarray] = queue.Queue()
         self._buffer = np.zeros(0, dtype=np.float32)
         self._stream = None
+
+        # silero-vad-lite は mlx バックエンド専用依存 (macOS のみインストール) なので
+        # モジュール先頭ではなくここで遅延 import する。これにより audio.py 自体は
+        # silero 未インストールの Windows でも import 可能 (定数を main.py が参照するため)。
+        from silero_vad_lite import SileroVAD
 
         self._vad = SileroVAD(sample_rate)
         self._vad_window = self._vad.window_size_samples

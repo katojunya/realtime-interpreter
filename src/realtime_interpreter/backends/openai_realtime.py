@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import queue
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -34,6 +35,7 @@ from typing import Iterator
 
 import numpy as np
 
+from realtime_interpreter.audio import DEVICE_NAME
 from realtime_interpreter.backends.base import TranslatedSegment
 from realtime_interpreter.i18n import DEFAULT_SOURCE, DEFAULT_TARGET
 
@@ -126,6 +128,37 @@ def _find_input_device(name: str, sd_module: ModuleType) -> int:
     raise RuntimeError(f"Device '{name}' not found. Available: {available}")
 
 
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _resolve_output_device_for_loopback(
+    name: str | None, sd_module: ModuleType
+) -> int:
+    """WASAPI loopback 用に「出力デバイス」を解決する (Windows).
+
+    - name=None or 既定デバイス名(DEVICE_NAME) のとき: 既定の出力デバイスを採用
+      (= ユーザが今聞いているスピーカー/ヘッドホンの音をそのまま loopback 録音)
+    - name 指定時: 出力チャンネルを持つデバイスを部分一致で検索
+    """
+    devices = sd_module.query_devices()
+    # 既定値 (BlackHole) のままか未指定なら、システム既定の出力を使う
+    if not name or name == DEVICE_NAME:
+        default_out = sd_module.default.device[1]
+        if default_out is None or default_out < 0:
+            raise RuntimeError("No default output device found for WASAPI loopback.")
+        return int(default_out)
+    for index, device in enumerate(devices):
+        if name in device["name"] and device["max_output_channels"] > 0:
+            return index
+    available = [
+        d["name"] for d in devices if d["max_output_channels"] > 0
+    ]
+    raise RuntimeError(
+        f"Output device '{name}' not found for loopback. Available outputs: {available}"
+    )
+
+
 @dataclass
 class _PendingTurn:
     """delta を蓄積中のターン. debounce で確定 → emit する."""
@@ -171,10 +204,13 @@ class OpenAIRealtimeBackend:
         max_segment_seconds: float = OPENAI_MAX_SEGMENT_SECONDS,
         source_lang: str = DEFAULT_SOURCE,
         target_lang: str = DEFAULT_TARGET,
+        loopback: bool | None = None,
     ) -> None:
         self._sd = sd_module
         self._device_name = device_name
         self._device_index: int | None = None
+        # loopback=None なら Windows のみ自動有効 (案 2a). 明示指定があればそれに従う。
+        self._loopback = _is_windows() if loopback is None else loopback
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         if not self._api_key:
             raise ValueError(
@@ -214,7 +250,14 @@ class OpenAIRealtimeBackend:
 
     def __enter__(self) -> "OpenAIRealtimeBackend":
         self._capture_start_monotonic = time.monotonic()
-        self._device_index = _find_input_device(self._device_name, self._sd)
+        # Windows は WASAPI loopback で「出力デバイス」を録音対象にする (案 1a+2a)。
+        # それ以外 (macOS/Linux) は従来どおり入力デバイスを開く。
+        if self._loopback:
+            self._device_index = _resolve_output_device_for_loopback(
+                self._device_name, self._sd
+            )
+        else:
+            self._device_index = _find_input_device(self._device_name, self._sd)
         self._open_websocket()
         self._send_session_config()
         self._open_audio_stream()
@@ -294,12 +337,25 @@ class OpenAIRealtimeBackend:
         logger.debug("session.update sent: %s", json.dumps(msg))
 
     def _open_audio_stream(self) -> None:
+        extra_settings = None
+        if self._loopback:
+            # Windows: 出力デバイスを WASAPI loopback で「録音」として開く。
+            # これによりスピーカー再生中の音 (システム音声) をそのまま取り込める。
+            # 追加ソフト・管理者権限不要。
+            try:
+                extra_settings = self._sd.WasapiSettings(loopback=True)
+            except Exception as e:
+                raise RuntimeError(
+                    "WASAPI loopback is unavailable on this system "
+                    f"({e}). Loopback capture requires Windows + WASAPI host."
+                )
         self._stream = self._sd.InputStream(
             device=self._device_index,
             samplerate=OPENAI_SAMPLE_RATE,
             channels=2,
             dtype="float32",
             callback=self._audio_callback,
+            extra_settings=extra_settings,
         )
         self._stream.start()
 

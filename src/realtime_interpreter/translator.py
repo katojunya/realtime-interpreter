@@ -14,7 +14,6 @@ import time
 from dataclasses import dataclass
 
 import numpy as np
-import soundfile as sf
 
 from realtime_interpreter.i18n import DEFAULT_SOURCE, DEFAULT_TARGET, language_name
 
@@ -193,6 +192,9 @@ class GemmaAudioTranslator:
         """音声波形 (モノラル float32 @ 16kHz) を source 転写 + target 訳に変換."""
         self.load()
 
+        # mlx 系 / soundfile は macOS 専用依存. 遅延 import (Windows では translator
+        # 自体使われないが、モジュール import は通る必要がある)。
+        import soundfile as sf
         from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template
 

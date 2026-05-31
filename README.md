@@ -88,10 +88,22 @@ BlackHole 2ch
 
 ## 前提条件
 
+### macOS (mlx / openai 両バックエンド)
+
 - macOS (Apple Silicon)
 - Python 3.11〜3.13
 - [uv](https://docs.astral.sh/uv/)
 - [BlackHole 2ch](https://existential.audio/blackhole/) と Multi-Output Device 設定 (姉妹プロジェクト README 参照)
+
+### Windows (openai バックエンドのみ)
+
+- Windows 10/11
+- Python 3.11〜3.13
+- [uv](https://docs.astral.sh/uv/)
+- OpenAI API キー
+- **追加ソフト不要** — システム音声は WASAPI ループバックで取り込みます (管理者権限・仮想オーディオドライバ不要)
+
+> mlx バックエンド (ローカル Gemma 4) は Apple Silicon 専用のため Windows では使えません。Windows では `--backend openai` のみ利用可能です。
 
 ## セットアップ
 
@@ -99,7 +111,29 @@ BlackHole 2ch
 uv sync
 ```
 
-初回の `uv run realtime-interpreter` 実行時に Gemma 4 のモデルファイル (約 5GB) が HuggingFace から自動ダウンロードされます。
+`uv sync` はプラットフォームを自動判定します:
+- **macOS**: mlx-vlm 等を含む全依存をインストール (mlx / openai 両バックエンド利用可)
+- **Windows/Linux**: mlx 系はスキップされ、OpenAI バックエンドに必要な依存のみインストール
+
+(mlx バックエンド初回実行時に Gemma 4 のモデルファイル (約 5GB) が HuggingFace から自動ダウンロードされます。)
+
+### Windows での実行
+
+```powershell
+# PowerShell
+$env:OPENAI_API_KEY = "sk-..."
+uv run realtime-interpreter --backend openai
+```
+
+```cmd
+:: コマンドプロンプト
+set OPENAI_API_KEY=sk-...
+uv run realtime-interpreter --backend openai
+```
+
+引数なしで **既定のスピーカー (出力デバイス) の音を WASAPI ループバックで取り込み**、翻訳します。何かアプリ (YouTube, Zoom, Teams 等) で英語音声を再生すると、その音が翻訳されます。スピーカーからは普段どおり音が聞こえたままです。
+
+別の出力デバイスを取り込みたい場合は `--device "<出力デバイス名>"` で指定します。`--list-devices` で取り込み可能な出力デバイス一覧を確認できます。
 
 ## 使い方
 
@@ -335,7 +369,7 @@ uv run pytest
 ## 既知の制限事項
 
 - 英語→日本語のみ
-- macOS (Apple Silicon) 専用 (mlx-vlm に依存. OpenAI バックエンドは macOS 以外でも動くが BlackHole 設定の手順が異なる)
+- mlx バックエンドは macOS (Apple Silicon) 専用 (mlx-vlm に依存). OpenAI バックエンドは macOS / Windows で動作 (Windows は WASAPI ループバックで音声取り込み)
 - 入力デバイスは BlackHole 2ch を想定
 - Gemma 4 の音声入力は E2B / E4B 系のみ対応 (26B MoE / 31B Dense は不可)
 - セグメント完結まで何も表示されない設計 (低レイテンシ最優先ではなく、確定済み出力のストリームを目的とする)
