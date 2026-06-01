@@ -10,6 +10,7 @@ target 言語の訳を生成する。バックエンドは TranslatedSegment を
 バックエンド:
     mlx     ローカル MLX (Gemma 4 + mlx-vlm). 確定単位でしか出力しない (is_partial=False のみ)
     openai  OpenAI gpt-realtime-translate (WebSocket). delta 単位で in-place 更新
+    openai-chat  OpenAI-compatible Chat Completions REST. ローカル VAD で確定単位出力
 
 出力形式:
     [mm:ss] <source 転写>
@@ -49,6 +50,16 @@ from realtime_interpreter.backends.openai_realtime import (
     TURN_DEBOUNCE_MS,
     OpenAIRealtimeBackend,
 )
+from realtime_interpreter.backends.openai_chat import (
+    DEFAULT_OPENAI_CHAT_BASE_URL,
+    DEFAULT_OPENAI_CHAT_MAX_TOKENS,
+    DEFAULT_OPENAI_CHAT_MODEL,
+    DEFAULT_OPENAI_CHAT_TEMPERATURE,
+    DEFAULT_OPENAI_CHAT_TIMEOUT_SECONDS,
+    OpenAIChatAudioTranslator,
+    OpenAIChatBackend,
+    OpenAIChatCompatibleSummarizer,
+)
 from realtime_interpreter.renderer import StreamingRenderer
 from realtime_interpreter.session_logger import SessionLogger, format_offset
 from realtime_interpreter.summarizer import (
@@ -57,18 +68,22 @@ from realtime_interpreter.summarizer import (
 )
 # NOTE: mlx バックエンド固有の import (LocalMLXBackend / GemmaAudioTranslator / Summarizer)
 # は _build_backend() の mlx 分岐内で遅延 import する。これにより mlx 未インストールの
-# Windows/Linux でも --backend openai が動く。
+# Windows/Linux でも mlx 以外のバックエンドが動く。
 # 定数 (DEVICE_NAME 等, MODEL_PRESETS, DEFAULT_ALIAS) は軽量なので下で参照する。
 from realtime_interpreter.translator import DEFAULT_ALIAS, MODEL_PRESETS
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SUMMARY_INTERVAL_SECONDS = 60
-SUPPORTED_BACKENDS = ("mlx", "openai")
+SUPPORTED_BACKENDS = ("mlx", "openai", "openai-chat")
 
 
 def _is_windows() -> bool:
     return sys.platform == "win32"
+
+
+def _is_macos() -> bool:
+    return sys.platform == "darwin"
 
 
 def _list_devices() -> None:
@@ -157,29 +172,42 @@ def _check_input_device(device_name: str) -> None:
 
 
 def _parse_args() -> argparse.Namespace:
-    # mlx バックエンドは macOS (Apple Silicon) 専用. Windows では mlx 関連オプションを
-    # 一切登録しない (= --help に出ない & 渡すと "unrecognized arguments" でエラー)。
-    mlx_available = not _is_windows()
+    # mlx バックエンドは macOS (Apple Silicon) 専用. mlx が使えない環境では
+    # mlx モデル関連オプションを登録しない (= --help に出ない & 渡すと
+    # unrecognized arguments).
+    mlx_available = _is_macos()
+    openai_chat_available = _is_macos() or _is_windows()
 
     if mlx_available:
         description = (
             "Low-latency simultaneous interpreter. Default: English→Japanese. "
             "Use --source-lang / --target-lang (aliases: --from / --to, -s / -t) "
-            "to change languages. Backends: local MLX (Gemma 4) or OpenAI gpt-realtime-translate."
+            "to change languages. Backends: local MLX (Gemma 4), OpenAI "
+            "gpt-realtime-translate, or OpenAI-compatible Chat Completions."
         )
         backend_choices = SUPPORTED_BACKENDS
         backend_default = "mlx"
         backend_help = "Translation backend (default: mlx)"
-    else:
+    elif _is_windows():
         description = (
-            "Low-latency simultaneous interpreter (Windows: OpenAI backend only). "
+            "Low-latency simultaneous interpreter (Windows: OpenAI realtime or "
+            "OpenAI-compatible Chat Completions). "
             "Default: English→Japanese. Use --source-lang / --target-lang "
             "(aliases: --from / --to, -s / -t) to change languages."
         )
-        # Windows では openai のみ. mlx は選択肢から除外する。
+        # Windows では mlx を除外し、WASAPI loopback 対応済みの openai/openai-chat を許可する。
+        backend_choices = ("openai", "openai-chat")
+        backend_default = "openai"
+        backend_help = "Translation backend (Windows default: openai)"
+    else:
+        description = (
+            "Low-latency simultaneous interpreter (OpenAI realtime backend). "
+            "Default: English→Japanese. Use --source-lang / --target-lang "
+            "(aliases: --from / --to, -s / -t) to change languages."
+        )
         backend_choices = ("openai",)
         backend_default = "openai"
-        backend_help = "Translation backend (Windows: openai only)"
+        backend_help = "Translation backend"
 
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
@@ -215,7 +243,8 @@ def _parse_args() -> argparse.Namespace:
         metavar="CODE",
         help=(
             "Source (spoken) language ISO 639-1 code. "
-            "Affects prompt for mlx backend; input transcription is auto-detected on openai backend. "
+            "Affects prompt for mlx/openai-chat backends when available; input "
+            "transcription is auto-detected on openai realtime backend. "
             f"(default: {DEFAULT_SOURCE!r}). Aliases: --from, -s. Use --list-languages."
         ),
     )
@@ -226,7 +255,8 @@ def _parse_args() -> argparse.Namespace:
         metavar="CODE",
         help=(
             "Target (translation) language ISO 639-1 code. "
-            "Affects prompt for mlx backend and audio.output.language for openai backend. "
+            "Affects prompt for mlx/openai-chat backends when available and "
+            "audio.output.language for openai realtime backend. "
             f"(default: {DEFAULT_TARGET!r}). Aliases: --to, -t. Use --list-languages."
         ),
     )
@@ -236,7 +266,7 @@ def _parse_args() -> argparse.Namespace:
         help="List known language codes and exit",
     )
 
-    # mlx 関連オプションは macOS のみ登録. Windows では表示も受付もしない。
+    # mlx モデル関連オプションは macOS のみ登録. Windows では表示も受付もしない。
     if mlx_available:
         mlx_group = parser.add_argument_group("mlx backend")
         mlx_group.add_argument(
@@ -253,27 +283,31 @@ def _parse_args() -> argparse.Namespace:
             action="store_true",
             help="[mlx] List available model presets and exit",
         )
-        mlx_group.add_argument(
+
+    if mlx_available or openai_chat_available:
+        local_vad_group = parser.add_argument_group("local VAD segmentation")
+        local_vad_group.add_argument(
             "--end-silence-ms",
             type=int,
             default=END_SILENCE_MS,
             help=(
-                "[mlx] Silence (ms) that ends a speech segment. "
+                "[mlx/openai-chat] Silence (ms) that ends a speech segment. "
                 "Lower = smaller chunks, faster output, more risk of mid-sentence cuts. "
                 f"(default: {END_SILENCE_MS})"
             ),
         )
-        mlx_group.add_argument(
+        local_vad_group.add_argument(
             "--max-segment-seconds",
             type=float,
             default=MAX_SEGMENT_SECONDS,
             help=(
-                "[mlx] Hard cap (seconds) for a single segment when there is no silence. "
+                "[mlx/openai-chat] Hard cap (seconds) for a single segment when "
+                "there is no silence. "
                 f"Lower = smaller chunks for continuous speech. (default: {MAX_SEGMENT_SECONDS})"
             ),
         )
 
-    openai_group = parser.add_argument_group("openai backend")
+    openai_group = parser.add_argument_group("openai realtime backend")
     openai_group.add_argument(
         "--openai-model",
         default=DEFAULT_OPENAI_MODEL,
@@ -311,14 +345,69 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
 
+    if openai_chat_available:
+        openai_chat_group = parser.add_argument_group("openai-chat backend")
+        openai_chat_group.add_argument(
+            "--openai-chat-base-url",
+            default=DEFAULT_OPENAI_CHAT_BASE_URL,
+            help=(
+                "[openai-chat] OpenAI-compatible base URL. "
+                f"(default: {DEFAULT_OPENAI_CHAT_BASE_URL!r})"
+            ),
+        )
+        openai_chat_group.add_argument(
+            "--openai-chat-model",
+            default=DEFAULT_OPENAI_CHAT_MODEL,
+            help=(
+                "[openai-chat] Chat Completions model id. "
+                f"(default: {DEFAULT_OPENAI_CHAT_MODEL!r})"
+            ),
+        )
+        openai_chat_group.add_argument(
+            "--openai-chat-api-key",
+            default=None,
+            help=(
+                "[openai-chat] Bearer token. Defaults to OPENAI_CHAT_API_KEY, "
+                "then OPENAI_API_KEY, then 'ollama'."
+            ),
+        )
+        openai_chat_group.add_argument(
+            "--openai-chat-timeout-seconds",
+            type=float,
+            default=DEFAULT_OPENAI_CHAT_TIMEOUT_SECONDS,
+            help=(
+                "[openai-chat] Per-request timeout in seconds. "
+                f"(default: {DEFAULT_OPENAI_CHAT_TIMEOUT_SECONDS:g})"
+            ),
+        )
+        openai_chat_group.add_argument(
+            "--openai-chat-max-tokens",
+            type=int,
+            default=DEFAULT_OPENAI_CHAT_MAX_TOKENS,
+            help=(
+                "[openai-chat] Max output tokens per audio segment. "
+                f"(default: {DEFAULT_OPENAI_CHAT_MAX_TOKENS})"
+            ),
+        )
+        openai_chat_group.add_argument(
+            "--openai-chat-temperature",
+            type=float,
+            default=DEFAULT_OPENAI_CHAT_TEMPERATURE,
+            help=(
+                "[openai-chat] Sampling temperature. "
+                f"(default: {DEFAULT_OPENAI_CHAT_TEMPERATURE:g})"
+            ),
+        )
+
     parser.add_argument(
         "--summary-interval-seconds",
         type=int,
         default=DEFAULT_SUMMARY_INTERVAL_SECONDS,
         help=(
             "Generate a periodic summary (target language) of the last N seconds. "
-            "0 to disable. mlx backend uses local Gemma 4; openai backend uses "
-            "Chat Completions (--openai-summary-model). "
+            "0 to disable. mlx backend uses local Gemma 4; openai realtime uses "
+            "Chat Completions (--openai-summary-model); openai-chat, when "
+            "available, uses the same OpenAI-compatible endpoint. "
             f"(default: {DEFAULT_SUMMARY_INTERVAL_SECONDS})"
         ),
     )
@@ -368,7 +457,10 @@ def _print_languages() -> None:
 
 def _build_backend(
     args: argparse.Namespace,
-) -> tuple[TranslationBackend, Summarizer | OpenAIChatSummarizer | None]:
+) -> tuple[
+    TranslationBackend,
+    Summarizer | OpenAIChatSummarizer | OpenAIChatCompatibleSummarizer | None,
+]:
     summary_enabled = args.summary_interval_seconds > 0
     src = normalize_language_code(args.source_lang)
     tgt = normalize_language_code(args.target_lang)
@@ -388,7 +480,8 @@ def _build_backend(
             raise SystemExit(
                 f"error: mlx backend unavailable ({e}). "
                 "The mlx backend requires macOS (Apple Silicon) with mlx-vlm installed. "
-                "On Windows/Linux use --backend openai."
+                "On Windows use --backend openai or --backend openai-chat; "
+                "on Linux use --backend openai."
             )
 
         translator = GemmaAudioTranslator(
@@ -439,6 +532,55 @@ def _build_backend(
         )
         return backend, summarizer
 
+    if args.backend == "openai-chat":
+        if args.end_silence_ms <= 0:
+            raise SystemExit("error: --end-silence-ms must be positive")
+        if args.max_segment_seconds <= 0:
+            raise SystemExit("error: --max-segment-seconds must be positive")
+        if args.openai_chat_timeout_seconds <= 0:
+            raise SystemExit("error: --openai-chat-timeout-seconds must be positive")
+        if args.openai_chat_max_tokens <= 0:
+            raise SystemExit("error: --openai-chat-max-tokens must be positive")
+        if args.openai_chat_temperature < 0:
+            raise SystemExit("error: --openai-chat-temperature must be >= 0")
+
+        translator = OpenAIChatAudioTranslator(
+            model=args.openai_chat_model,
+            base_url=args.openai_chat_base_url,
+            api_key=args.openai_chat_api_key,
+            timeout_seconds=args.openai_chat_timeout_seconds,
+            max_tokens=args.openai_chat_max_tokens,
+            temperature=args.openai_chat_temperature,
+            source_lang=src,
+            target_lang=tgt,
+        )
+        try:
+            backend = OpenAIChatBackend(
+                sd_module=sd,
+                device_name=args.device,
+                translator=translator,
+                end_silence_ms=args.end_silence_ms,
+                max_segment_seconds=args.max_segment_seconds,
+            )
+        except ImportError as e:
+            raise SystemExit(
+                f"error: openai-chat backend unavailable ({e}). "
+                "It requires local VAD dependencies for audio segmentation."
+            )
+        summarizer = (
+            OpenAIChatCompatibleSummarizer(
+                model=args.openai_chat_model,
+                base_url=args.openai_chat_base_url,
+                api_key=args.openai_chat_api_key,
+                timeout_seconds=args.openai_chat_timeout_seconds,
+                source_lang=src,
+                target_lang=tgt,
+            )
+            if summary_enabled
+            else None
+        )
+        return backend, summarizer
+
     raise SystemExit(f"unknown backend: {args.backend}")
 
 
@@ -460,7 +602,7 @@ def _emit_settings(args: argparse.Namespace) -> None:
             f"summary={summary_str}",
             file=sys.stderr,
         )
-    else:
+    elif args.backend == "openai":
         max_seg_str = (
             f"{args.openai_max_segment_seconds}s"
             if args.openai_max_segment_seconds > 0
@@ -480,11 +622,21 @@ def _emit_settings(args: argparse.Namespace) -> None:
             f"summary={summary_label}",
             file=sys.stderr,
         )
+    elif args.backend == "openai-chat":
+        print(
+            f"Backend: openai-chat ({args.openai_chat_model}) | "
+            f"Base URL: {args.openai_chat_base_url} | "
+            f"Lang: {lang_label} | "
+            f"VAD: end_silence={args.end_silence_ms}ms, "
+            f"max_segment={args.max_segment_seconds}s | "
+            f"summary={summary_str}",
+            file=sys.stderr,
+        )
 
 
 def _submit_summary_task(
     executor: ThreadPoolExecutor,
-    summarizer: Summarizer | OpenAIChatSummarizer,
+    summarizer: Summarizer | OpenAIChatSummarizer | OpenAIChatCompatibleSummarizer,
     source_buffer: list[tuple[float, str]],
     since_offset: float,
     until_offset: float,

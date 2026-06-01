@@ -1157,7 +1157,7 @@ dependencies = [
     { name = "openai" },
     { name = "pyaudiowpatch", marker = "sys_platform == 'win32'" },
     { name = "rich" },
-    { name = "silero-vad-lite", marker = "sys_platform == 'darwin'" },
+    { name = "silero-vad-lite", marker = "sys_platform == 'darwin' or sys_platform == 'win32'" },
     { name = "sounddevice" },
     { name = "soundfile", marker = "sys_platform == 'darwin'" },
     { name = "websocket-client" },
@@ -1176,7 +1176,7 @@ requires-dist = [
     { name = "openai", specifier = ">=1.40" },
     { name = "pyaudiowpatch", marker = "sys_platform == 'win32'", specifier = ">=0.2.12" },
     { name = "rich", specifier = ">=13.7" },
-    { name = "silero-vad-lite", marker = "sys_platform == 'darwin'", specifier = ">=0.1" },
+    { name = "silero-vad-lite", marker = "sys_platform == 'darwin' or sys_platform == 'win32'", specifier = ">=0.2.1" },
     { name = "sounddevice", specifier = ">=0.5" },
     { name = "soundfile", marker = "sys_platform == 'darwin'", specifier = ">=0.12" },
     { name = "websocket-client", specifier = ">=1.8" },
@@ -1329,10 +1329,13 @@ sdist = { url = "https://files.pythonhosted.org/packages/8d/8a/9c33e393a2068ac7e
 wheels = [
     { url = "https://files.pythonhosted.org/packages/67/44/e883159ccc321125839d74f849c349e23f33b61de14845ad799dad6bbe54/silero_vad_lite-0.2.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:5a4198be1dbb413ac0031cf76e5eedd1ad34f9922c74055eb653a41e02d64c7a", size = 30750461, upload-time = "2024-10-01T07:44:00.309Z" },
     { url = "https://files.pythonhosted.org/packages/02/4e/d4f6fa9e2c4b585dd55f51c8964c3b2228506fcf5d6523cd01531333a9dc/silero_vad_lite-0.2.1-cp311-cp311-macosx_11_0_x86_64.whl", hash = "sha256:958ff533c37e84bbe88ee6fb41f6b43f8f261c48117bc81fa776fec4b2cec3f8", size = 30752295, upload-time = "2024-10-01T07:44:06.476Z" },
+    { url = "https://files.pythonhosted.org/packages/e6/32/fdebefaa7b2a7dcc82fc3eb62ad40064cc83935300613c96fa23d8e057fa/silero_vad_lite-0.2.1-cp311-cp311-win_amd64.whl", hash = "sha256:d85e6e95133e013cc9d587f701fc462d2fd6b7b23f1b36a902dc8d8f990e2434", size = 6612344, upload-time = "2024-10-01T07:44:11.533Z" },
     { url = "https://files.pythonhosted.org/packages/a2/ea/e389cd02b963a56421550f11a88eaca13f93771e2c065e1f56a36d565469/silero_vad_lite-0.2.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:3de3c2dfd9b8f90a5725498479c016eb5b8aa3eb918c1132cb734757025d5f88", size = 30750460, upload-time = "2024-10-01T07:44:14.147Z" },
     { url = "https://files.pythonhosted.org/packages/0a/9f/1a90098f5017c842bdf8c2c5e1edca7b4689980ff03924bcce3e8800e04b/silero_vad_lite-0.2.1-cp312-cp312-macosx_11_0_x86_64.whl", hash = "sha256:21bc8e03d74ca952cca4cb20cde711fc886cd1dd5093b7fc51de1607ec890fab", size = 30752295, upload-time = "2024-10-01T07:44:17.914Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/4e/b240c77663d14882cfd78005bbef0391506b843283e278b2c2683627499d/silero_vad_lite-0.2.1-cp312-cp312-win_amd64.whl", hash = "sha256:8bab6364ae0b0316c4e787e90b5efd229fbad18b351b3e80fe0dc5e7bdcdebdc", size = 6612344, upload-time = "2024-10-01T07:44:23.47Z" },
     { url = "https://files.pythonhosted.org/packages/e9/45/692d9cc332e53d3c77d06303d7b978b8e2423454f075c02b95989796eb96/silero_vad_lite-0.2.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:6eb4c81dce2d61102865f17ceb60a6afa6e1ca0a7330c4a55e07e3137b74db44", size = 30750459, upload-time = "2024-10-01T07:44:26.348Z" },
     { url = "https://files.pythonhosted.org/packages/71/7a/fda5268fe3b661d16f6eae56444e14c1f2eb62aae51ca01cc01bd6194f58/silero_vad_lite-0.2.1-cp313-cp313-macosx_11_0_x86_64.whl", hash = "sha256:95c32ecd7c62c67903f5e67e18cc8ca1d0b93c3b020571698236502a66adb94e", size = 30752298, upload-time = "2024-10-01T07:44:29.441Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/cb/3ee98dd6174c7331e38b90c36eb675b406add4ab7edb45604096affda3e5/silero_vad_lite-0.2.1-cp313-cp313-win_amd64.whl", hash = "sha256:5b11772d09383dc6e7cb89976110a75be17876427f7a019649a3761790dc83db", size = 6612343, upload-time = "2024-10-01T07:44:36.145Z" },
 ]
 
 [[package]]

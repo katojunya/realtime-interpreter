@@ -7,9 +7,10 @@ authors = [
     { name = "Jun-ya Kato", email = "kato@win6.jp" }
 ]
 requires-python = ">=3.11,<3.14"
-# クロスプラットフォーム共通の依存 (OpenAI バックエンドはこれだけで動く).
-# mlx バックエンド関連は Apple Silicon 専用なので platform marker で macOS のみに限定し、
-# Windows/Linux では `uv sync` 時に自動でスキップされる (= OpenAI バックエンド専用構成)。
+# クロスプラットフォーム共通の依存.
+# mlx-vlm は Apple Silicon 専用なので macOS のみに限定する。
+# silero-vad-lite はローカル VAD バックエンド (mlx / openai-chat) で使うため、
+# macOS と Windows に入れる。Windows では openai-chat が WASAPI loopback + VAD で使う。
 dependencies = [
     "sounddevice>=0.5",
     "numpy>=1.26",
@@ -18,9 +19,10 @@ dependencies = [
     "openai>=1.40",
     # --- Windows only: WASAPI loopback capture (sounddevice has no loopback support) ---
     "pyaudiowpatch>=0.2.12; sys_platform == 'win32'",
+    # --- local VAD backends (mlx / openai-chat) ---
+    "silero-vad-lite>=0.2.1; sys_platform == 'darwin' or sys_platform == 'win32'",
     # --- mlx backend only (macOS / Apple Silicon) ---
     "mlx-vlm>=0.1.20; sys_platform == 'darwin'",
-    "silero-vad-lite>=0.1; sys_platform == 'darwin'",
     "librosa>=0.10; sys_platform == 'darwin'",
     "soundfile>=0.12; sys_platform == 'darwin'",
 ]

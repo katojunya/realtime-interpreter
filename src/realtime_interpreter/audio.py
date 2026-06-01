@@ -1,6 +1,7 @@
 """音声キャプチャ + VAD ベースの発話セグメント検出.
 
-BlackHole 2ch から音声を取得し、VAD で発話セグメントを検出する。
+macOS では BlackHole 2ch 等の入力デバイスから、Windows では WASAPI loopback
+から音声を取得し、VAD で発話セグメントを検出する。
 セグメントが完結したタイミングで「発話開始時刻 + 全体の音声」を yield する。
 
 仕様:
@@ -58,7 +59,59 @@ def find_device(name: str, sd_module: ModuleType) -> int:
     raise RuntimeError(f"Device '{name}' not found. Available: {available}")
 
 
-class SpeechSegmentCapture:
+def _to_mono(samples: np.ndarray) -> np.ndarray:
+    """ステレオ (N, channels) または 1 次元音声をモノラル float32 に変換."""
+    if samples.ndim == 2:
+        return np.mean(samples, axis=1).astype(np.float32)
+    return samples.astype(np.float32)
+
+
+def _resample_linear(mono: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """線形補間でサンプルレート変換する (依存追加なし)."""
+    if src_rate == dst_rate or mono.size == 0:
+        return mono.astype(np.float32, copy=False)
+    n_out = int(round(mono.size * dst_rate / src_rate))
+    if n_out <= 0:
+        return np.zeros(0, dtype=np.float32)
+    x_old = np.arange(mono.size, dtype=np.float64)
+    x_new = np.linspace(0.0, mono.size - 1, n_out)
+    return np.interp(x_new, x_old, mono).astype(np.float32)
+
+
+def _find_loopback_device(pa, name: str | None):
+    """PyAudioWPatch で WASAPI loopback デバイスを解決する (Windows).
+
+    - name=None or 既定デバイス名(DEVICE_NAME) のとき: 既定出力に対応する loopback
+    - name 指定時: loopback デバイス名の部分一致
+    """
+    import pyaudiowpatch as pyaudio
+
+    wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+    loopbacks = list(pa.get_loopback_device_info_generator())
+    if not loopbacks:
+        raise RuntimeError(
+            "No WASAPI loopback devices found. This environment cannot capture "
+            "system audio via loopback."
+        )
+
+    use_default = (not name) or (name == DEVICE_NAME)
+    if use_default:
+        default_out = pa.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
+        for lb in loopbacks:
+            if default_out["name"] in lb["name"]:
+                return lb
+        return loopbacks[0]
+
+    for lb in loopbacks:
+        if name in lb["name"]:
+            return lb
+    available = [lb["name"] for lb in loopbacks]
+    raise RuntimeError(
+        f"Loopback device matching {name!r} not found. Available: {available}"
+    )
+
+
+class _BaseSpeechSegmentCapture:
     """VAD ベースの発話セグメント検出.
 
     `segments()` は generator として、セグメントが完結するたびに `SpeechSegment` を yield する。
@@ -67,15 +120,11 @@ class SpeechSegmentCapture:
 
     def __init__(
         self,
-        sd_module: ModuleType,
-        device_name: str = DEVICE_NAME,
         sample_rate: int = SAMPLE_RATE,
         end_silence_ms: int = END_SILENCE_MS,
         max_segment_seconds: float = MAX_SEGMENT_SECONDS,
         min_segment_seconds: float = MIN_SEGMENT_SECONDS,
     ) -> None:
-        self._sd = sd_module
-        self._device_index = find_device(device_name, sd_module)
         self.sample_rate = sample_rate
         self._end_silence_samples = int(sample_rate * end_silence_ms / 1000)
         self._max_segment_samples = int(sample_rate * max_segment_seconds)
@@ -85,9 +134,9 @@ class SpeechSegmentCapture:
         self._buffer = np.zeros(0, dtype=np.float32)
         self._stream = None
 
-        # silero-vad-lite は mlx バックエンド専用依存 (macOS のみインストール) なので
-        # モジュール先頭ではなくここで遅延 import する。これにより audio.py 自体は
-        # silero 未インストールの Windows でも import 可能 (定数を main.py が参照するため)。
+        # silero-vad-lite はローカル VAD バックエンド (mlx/openai-chat) の依存。
+        # モジュール先頭ではなくここで遅延 import し、VAD を使わない openai realtime
+        # バックエンドでは未インストール環境でも audio.py を import できるようにする。
         from silero_vad_lite import SileroVAD
 
         self._vad = SileroVAD(sample_rate)
@@ -101,40 +150,6 @@ class SpeechSegmentCapture:
         self._segment_total_samples = 0
         self._segment_silence_samples = 0
         self._segment_start_offset = 0.0
-
-    def __enter__(self) -> SpeechSegmentCapture:
-        self._capture_start_monotonic = time.monotonic()
-        self._stream = self._sd.InputStream(
-            device=self._device_index,
-            samplerate=self.sample_rate,
-            channels=2,
-            dtype="float32",
-            callback=self._callback,
-        )
-        self._stream.start()
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None:
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-
-    def _callback(
-        self,
-        indata: np.ndarray,
-        frames: int,
-        time_info: object,
-        status: object,
-    ) -> None:
-        if status:
-            logger.warning("Audio status: %s", status)
-        mono = np.mean(indata, axis=1).astype(np.float32)
-        self._raw_queue.put(mono)
 
     def _drain_queue(self) -> None:
         chunks: list[np.ndarray] = [self._buffer]
@@ -225,3 +240,139 @@ class SpeechSegmentCapture:
 
             self._buffer = self._buffer[offset:]
             time.sleep(poll_interval)
+
+
+class SpeechSegmentCapture(_BaseSpeechSegmentCapture):
+    """sounddevice 入力デバイスから音声を取得する VAD セグメントキャプチャ."""
+
+    def __init__(
+        self,
+        sd_module: ModuleType,
+        device_name: str = DEVICE_NAME,
+        sample_rate: int = SAMPLE_RATE,
+        end_silence_ms: int = END_SILENCE_MS,
+        max_segment_seconds: float = MAX_SEGMENT_SECONDS,
+        min_segment_seconds: float = MIN_SEGMENT_SECONDS,
+    ) -> None:
+        super().__init__(
+            sample_rate=sample_rate,
+            end_silence_ms=end_silence_ms,
+            max_segment_seconds=max_segment_seconds,
+            min_segment_seconds=min_segment_seconds,
+        )
+        self._sd = sd_module
+        self._device_index = find_device(device_name, sd_module)
+
+    def __enter__(self) -> SpeechSegmentCapture:
+        self._capture_start_monotonic = time.monotonic()
+        self._stream = self._sd.InputStream(
+            device=self._device_index,
+            samplerate=self.sample_rate,
+            channels=2,
+            dtype="float32",
+            callback=self._callback,
+        )
+        self._stream.start()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+
+    def _callback(
+        self,
+        indata: np.ndarray,
+        frames: int,
+        time_info: object,
+        status: object,
+    ) -> None:
+        if status:
+            logger.warning("Audio status: %s", status)
+        self._raw_queue.put(_to_mono(indata))
+
+
+class WindowsLoopbackSpeechSegmentCapture(_BaseSpeechSegmentCapture):
+    """Windows の WASAPI loopback からシステム音声を取得する VAD キャプチャ."""
+
+    def __init__(
+        self,
+        device_name: str = DEVICE_NAME,
+        sample_rate: int = SAMPLE_RATE,
+        end_silence_ms: int = END_SILENCE_MS,
+        max_segment_seconds: float = MAX_SEGMENT_SECONDS,
+        min_segment_seconds: float = MIN_SEGMENT_SECONDS,
+    ) -> None:
+        super().__init__(
+            sample_rate=sample_rate,
+            end_silence_ms=end_silence_ms,
+            max_segment_seconds=max_segment_seconds,
+            min_segment_seconds=min_segment_seconds,
+        )
+        self._device_name = device_name
+        self._pa = None
+        self._capture_rate = sample_rate
+
+    def __enter__(self) -> WindowsLoopbackSpeechSegmentCapture:
+        try:
+            import pyaudiowpatch as pyaudio
+        except ImportError as e:
+            raise RuntimeError(
+                f"PyAudioWPatch is required for Windows loopback capture but is not "
+                f"installed ({e}). Run `uv sync` on Windows to install it."
+            )
+
+        self._capture_start_monotonic = time.monotonic()
+        self._pa = pyaudio.PyAudio()
+        device = _find_loopback_device(self._pa, self._device_name)
+        self._capture_rate = int(device["defaultSampleRate"])
+        channels = int(device["maxInputChannels"])
+        logger.info(
+            "WASAPI loopback device: [%s] %s (channels=%d, rate=%d -> %d)",
+            device["index"], device["name"], channels,
+            self._capture_rate, self.sample_rate,
+        )
+
+        def _pa_callback(in_data, frame_count, time_info, status):
+            try:
+                arr = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
+                if channels > 1:
+                    arr = arr.reshape(-1, channels)
+                mono = _to_mono(arr)
+                mono = _resample_linear(mono, self._capture_rate, self.sample_rate)
+                if mono.size:
+                    self._raw_queue.put(mono)
+            except Exception:
+                logger.exception("loopback callback failed")
+            return (None, pyaudio.paContinue)
+
+        self._stream = self._pa.open(
+            format=pyaudio.paInt16,
+            channels=channels,
+            rate=self._capture_rate,
+            frames_per_buffer=1024,
+            input=True,
+            input_device_index=device["index"],
+            stream_callback=_pa_callback,
+        )
+        self._stream.start_stream()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        try:
+            if self._stream is not None:
+                self._stream.stop_stream()
+                self._stream.close()
+        finally:
+            if self._pa is not None:
+                self._pa.terminate()

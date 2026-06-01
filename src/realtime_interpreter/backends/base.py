@@ -29,7 +29,7 @@ class TranslatedSegment:
 
 @dataclass
 class BackendConfig:
-    """両バックエンドが共通で参照する設定."""
+    """複数バックエンドが共通で参照する設定."""
 
     device_name: str
     end_silence_ms: int

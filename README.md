@@ -8,8 +8,9 @@
 |---|---|---|
 | `mlx` (既定) | mlx-vlm + Gemma 4 (ローカル) | オフライン・無料・Apple Silicon ネイティブ |
 | `openai` | OpenAI gpt-realtime-translate (WebSocket) | クラウド・$0.034/分・低レイテンシ・サーバ VAD |
+| `openai-chat` | OpenAI 互換 Chat Completions REST (Ollama 等) | ローカル VAD で区切った WAV を直接マルチモーダル LLM に入力 |
 
-本ツールは **Whisper を経由せず** Gemma 4 (mlx-vlm) に音声を直接入力し、1 回の推論で **英語転写と日本語訳を同時生成** します。OpenAI バックエンドではサーバ側で同等の処理が走ります。
+本ツールは **Whisper を経由せず** Gemma 4 (mlx-vlm) に音声を直接入力し、1 回の推論で **英語転写と日本語訳を同時生成** します。OpenAI Realtime バックエンドではサーバ側で同等の処理が走ります。`openai-chat` バックエンドでは Ollama 等の OpenAI 互換 REST API に WAV 音声を直接渡します。
 
 ## 出力フォーマット
 
@@ -81,6 +82,20 @@ BlackHole 2ch
 
 **要約機能** は OpenAI Chat Completions API (既定 `gpt-5-mini`) を使って実装されています。Realtime API とは別経路ですが、**同じ `OPENAI_API_KEY` で動作** するため追加設定不要。コストは要約 1 回あたり概ね $0.0003〜$0.0005、60 秒に 1 回の頻度なら **$0.02〜$0.05/時** ほどで、翻訳コスト ($3/h) に対して誤差レベル。`--openai-summary-model` で gpt-4o-mini など他モデルへ切り替え可能 (`gpt-4o-mini` ならさらに半額)。
 
+### OpenAI Chat バックエンド (OpenAI 互換 REST)
+
+```
+macOS: BlackHole 2ch / Windows: WASAPI loopback
+  → SpeechSegmentCapture (Silero VAD で発話を区切る. 無音 800ms or 最大 8s で finalize)
+  → WAV PCM16 にエンコード
+  → OpenAI-compatible /v1/chat/completions
+       input_audio として WAV を渡し、1 回の推論で "SRC: ... / TGT: ..." を生成
+  → 確定したセグメント単位で append-only 出力
+  → SessionLogger に同形式でログ記録
+```
+
+既定では Ollama を想定し、`--openai-chat-base-url http://localhost:11434/v1` と `--openai-chat-model gemma4:e4b` を使います。Ollama 0.24.0 + `gemma4:e4b` / `gemma4:e2b` では WAV 音声の直接入力を確認済みです。REST 方式のため OpenAI Realtime のような delta 単位の in-place 表示はなく、MLX と同じく発話セグメント確定後に表示されます。
+
 ## 必要なディスク容量
 
 - Gemma 4 E4B 4-bit MLX: 約 5 GB (初回起動時に `~/.cache/huggingface/hub/` へ自動ダウンロード)
@@ -88,23 +103,26 @@ BlackHole 2ch
 
 ## 前提条件
 
-### macOS (mlx / openai 両バックエンド)
+### macOS (mlx / openai / openai-chat)
 
 - macOS (Apple Silicon)
 - Python 3.11〜3.13
 - [uv](https://docs.astral.sh/uv/)
 - [BlackHole 2ch](https://existential.audio/blackhole/) と Multi-Output Device 設定 (姉妹プロジェクト README 参照)
+- `openai-chat` でローカル推論する場合は [Ollama](https://ollama.com/) 等の OpenAI 互換サーバ
 
-### Windows (openai バックエンドのみ)
+### Windows (openai / openai-chat)
 
 - Windows 10/11
 - Python 3.11〜3.13
 - [uv](https://docs.astral.sh/uv/)
-- OpenAI API キー
+- `openai` 使用時: OpenAI API キー
+- `openai-chat` 使用時: Ollama 等の OpenAI 互換サーバ (Ollama ならAPIキー不要)
 - **追加ソフト不要** — システム音声は WASAPI ループバックで取り込みます (管理者権限・仮想オーディオドライバ不要). `uv sync` で [PyAudioWPatch](https://github.com/s0d3s/PyAudioWPatch) (loopback 対応の PyAudio フォーク) が自動インストールされます
+- `openai-chat` は `uv sync` でインストールされる `silero-vad-lite` を使ってローカルで発話区切りを検出します
 - VDI (リモートデスクトップ等の「リモート オーディオ」) でも動作確認済み
 
-> mlx バックエンド (ローカル Gemma 4) は Apple Silicon 専用のため Windows では使えません。Windows では `--backend openai` のみ利用可能です。
+> mlx バックエンド (ローカル Gemma 4 via mlx-vlm) は Apple Silicon 専用のため Windows では使えません。Windows では `--backend openai` または `--backend openai-chat` を使ってください。
 
 ## セットアップ
 
@@ -113,12 +131,15 @@ uv sync
 ```
 
 `uv sync` はプラットフォームを自動判定します:
-- **macOS**: mlx-vlm 等を含む全依存をインストール (mlx / openai 両バックエンド利用可)
-- **Windows/Linux**: mlx 系はスキップされ、OpenAI バックエンドに必要な依存のみインストール
+- **macOS**: mlx-vlm / silero-vad-lite 等を含む全依存をインストール (mlx / openai / openai-chat 利用可)
+- **Windows**: mlx 系はスキップされ、openai / openai-chat に必要な PyAudioWPatch と silero-vad-lite をインストール
+- **Linux**: mlx 系はスキップされ、openai バックエンドに必要な依存のみインストール
 
 (mlx バックエンド初回実行時に Gemma 4 のモデルファイル (約 5GB) が HuggingFace から自動ダウンロードされます。)
 
 ### Windows での実行
+
+OpenAI Realtime を使う場合:
 
 ```powershell
 # PowerShell
@@ -132,7 +153,15 @@ set OPENAI_API_KEY=sk-...
 uv run realtime-interpreter --backend openai
 ```
 
-引数なしで **既定のスピーカー (出力デバイス) の音を WASAPI ループバックで取り込み**、翻訳します。何かアプリ (YouTube, Zoom, Teams 等) で英語音声を再生すると、その音が翻訳されます。スピーカーからは普段どおり音が聞こえたままです。
+Ollama 等の OpenAI 互換 REST API を使う場合:
+
+```powershell
+ollama serve
+ollama pull gemma4:e4b
+uv run realtime-interpreter --backend openai-chat
+```
+
+どちらのバックエンドも、Windowsでは **既定のスピーカー (出力デバイス) の音を WASAPI ループバックで取り込み**、翻訳します。何かアプリ (YouTube, Zoom, Teams 等) で英語音声を再生すると、その音が翻訳されます。スピーカーからは普段どおり音が聞こえたままです。
 
 別の出力デバイスを取り込みたい場合は `--device "<出力デバイス名>"` で指定します。`--list-devices` で取り込み可能な出力デバイス一覧を確認できます。
 
@@ -157,39 +186,63 @@ OpenAI バックエンドは **WebSocket ベースのストリーミング** で
 出力デバイスが Multi-Output Device になっていない場合、起動時に切替を促します。
 終了は `Ctrl+C`。
 
+### OpenAI Chat バックエンド (Ollama 等)
+
+```bash
+ollama serve
+ollama pull gemma4:e4b
+uv run realtime-interpreter --backend openai-chat
+```
+
+別の OpenAI 互換サーバやモデルを使う場合:
+
+```bash
+uv run realtime-interpreter \
+  --backend openai-chat \
+  --openai-chat-base-url http://localhost:11434/v1 \
+  --openai-chat-model gemma4:e2b
+```
+
 ### オプション
 
 | フラグ | 説明 | 既定 | 対象 |
 |---|---|---|---|
-| `--backend` | `mlx` or `openai` | `mlx` | 共通 |
+| `--backend` | `mlx` / `openai` / `openai-chat` | macOS: `mlx`, Windows: `openai` | 共通 |
 | `--device` | 入力デバイス名 (部分一致) | `BlackHole 2ch` | 共通 |
 | `--list-devices` | オーディオデバイス一覧を表示して終了 | — | 共通 |
 | `--no-device-check` | 起動時の出力デバイス確認プロンプトをスキップ (ルーティングを自分で管理する場合) | (off) | 共通 |
 | `--source-lang` / `--from` / `-s` | 音声の言語 (ISO 639-1) | `en` | 共通 |
 | `--target-lang` / `--to` / `-t` | 翻訳先の言語 (ISO 639-1) | `ja` | 共通 |
 | `--list-languages` | 既知の言語コードを表示して終了 | — | 共通 |
-| `--summary-interval-seconds` | N 秒ごとに過去 N 秒分の source 言語テキストを target 言語で要約. `0` で無効. MLX は Gemma 4 を再利用、OpenAI は Chat Completions (`--openai-summary-model`) を使用 | `60` | 共通 |
+| `--summary-interval-seconds` | N 秒ごとに過去 N 秒分の source 言語テキストを target 言語で要約. `0` で無効. MLX は Gemma 4 を再利用、OpenAI は Chat Completions (`--openai-summary-model`)、openai-chat は同じ OpenAI 互換 API を使用 | `60` | 共通 |
 | `--log-dir` | セッションログの出力先 | `logs/` | 共通 |
 | `--debug` | 詳細ログを stderr に出す | (off) | 共通 |
 | `--model` | モデルエイリアス or 完全な HuggingFace ID | `e4b` | mlx |
 | `--list-models` | プリセット一覧を表示して終了 | — | mlx |
-| `--end-silence-ms` | この長さの無音で発話セグメントを区切る | `800` | mlx |
-| `--max-segment-seconds` | 連続発話時のセグメント最大長 (秒) | `8.0` | mlx |
+| `--end-silence-ms` | この長さの無音で発話セグメントを区切る | `800` | mlx / openai-chat |
+| `--max-segment-seconds` | 連続発話時のセグメント最大長 (秒) | `8.0` | mlx / openai-chat |
 | `--openai-model` | Realtime モデル ID | `gpt-realtime-translate` | openai |
+| `--openai-chat-base-url` | OpenAI 互換 API の base URL | `http://localhost:11434/v1` | openai-chat |
+| `--openai-chat-model` | Chat Completions モデル ID | `gemma4:e4b` | openai-chat |
+| `--openai-chat-api-key` | Bearer token. 未指定時は `OPENAI_CHAT_API_KEY` → `OPENAI_API_KEY` → `ollama` | — | openai-chat |
+| `--openai-chat-timeout-seconds` | 1 セグメントあたりの REST API タイムアウト | `120` | openai-chat |
+| `--openai-chat-max-tokens` | 1 セグメントあたりの出力上限 | `384` | openai-chat |
+| `--openai-chat-temperature` | サンプリング温度 | `0` | openai-chat |
 
 環境変数:
 - `REALTIME_INTERPRETER_MODEL`: MLX デフォルトモデルの上書き (エイリアスでも完全 ID でも可)
-- `OPENAI_API_KEY`: OpenAI バックエンド使用時に必須
+- `OPENAI_API_KEY`: `openai` バックエンド使用時に必須. `openai-chat` では互換サーバが認証を要求する場合のみ使用
+- `OPENAI_CHAT_API_KEY`: `openai-chat` バックエンドの Bearer token. Ollama では未指定で可
 
 ### 言語の切り替え
 
-ISO 639-1 (2 文字コード) で source / target を指定します. 両バックエンドで共通。
+ISO 639-1 (2 文字コード) で source / target を指定します. 各バックエンドで共通。
 
 ```bash
 # 既定: 英語 → 日本語
 uv run realtime-interpreter
 
-# 短縮形 (mlx or openai どちらでも)
+# 短縮形 (mlx / openai / openai-chat いずれでも)
 uv run realtime-interpreter -s en -t es     # 英語 → スペイン語
 uv run realtime-interpreter --from zh --to en  # 中国語 → 英語
 uv run realtime-interpreter --source-lang ja --target-lang en  # 日本語 → 英語
@@ -214,6 +267,7 @@ uv run realtime-interpreter --list-languages
 |---|---|---|
 | **mlx** | プロンプトに言語名を埋め込んで Gemma 4 に渡す. 多言語対応だが品質は言語ペアに依存 | 同上 |
 | **openai** | `gpt-realtime-whisper` が **自動検出** (source 指定はメタ情報として保持するのみ) | `audio.output.language` に target コードを設定 |
+| **openai-chat** | プロンプトに言語名を埋め込んで OpenAI 互換 Chat Completions に渡す. 多言語対応はモデル依存 | 同上 |
 
 #### OpenAI の制約
 
@@ -370,11 +424,11 @@ uv run pytest
 ## 既知の制限事項
 
 - 英語→日本語のみ
-- mlx バックエンドは macOS (Apple Silicon) 専用 (mlx-vlm に依存). OpenAI バックエンドは macOS / Windows で動作 (Windows は WASAPI ループバックで音声取り込み)
-- 入力デバイスは BlackHole 2ch を想定
+- mlx バックエンドは macOS (Apple Silicon) 専用 (mlx-vlm に依存). `openai` / `openai-chat` バックエンドは macOS / Windows で動作 (Windows は WASAPI ループバックで音声取り込み)
+- macOS の入力デバイスは BlackHole 2ch を想定. Windows は既定スピーカー等の出力デバイスを WASAPI loopback で取り込む
 - Gemma 4 の音声入力は E2B / E4B 系のみ対応 (26B MoE / 31B Dense は不可)
 - セグメント完結まで何も表示されない設計 (低レイテンシ最優先ではなく、確定済み出力のストリームを目的とする)
-- 要約機能はバックエンドごとに別経路 — MLX: ローカル Gemma 4 (text-only) を再利用 / OpenAI: Chat Completions API (`gpt-5-mini` 等)
+- 要約機能はバックエンドごとに別経路 — MLX: ローカル Gemma 4 (text-only) を再利用 / OpenAI: Chat Completions API (`gpt-5-mini` 等) / openai-chat: 同じ OpenAI 互換 REST API
 
 ## 設計方針
 
