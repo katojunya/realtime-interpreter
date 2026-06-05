@@ -229,7 +229,7 @@ class OpenAIRealtimeBackend:
 
     def __init__(
         self,
-        sd_module: ModuleType,
+        sd_module: ModuleType | None,
         device_name: str,
         api_key: str | None = None,
         model: str = DEFAULT_OPENAI_MODEL,

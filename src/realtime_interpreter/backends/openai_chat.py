@@ -249,7 +249,7 @@ class OpenAIChatBackend:
 
     def __init__(
         self,
-        sd_module: ModuleType,
+        sd_module: ModuleType | None,
         device_name: str,
         translator: OpenAIChatAudioTranslator,
         end_silence_ms: int = END_SILENCE_MS,

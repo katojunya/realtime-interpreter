@@ -26,7 +26,25 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import sounddevice as sd
+# 注意: sounddevice はモジュール先頭で import しない。
+# sounddevice は PortAudio をロードするが、ARM64 Windows ではその DLL の依存が欠けて
+# import 自体が失敗する (error 0x7e)。Windows の音声処理は PyAudioWPatch で完結するため
+# sounddevice は不要。mlx 経路と macOS/Linux の openai 入力経路でのみ遅延 import する。
+
+
+def _load_sounddevice():
+    """sounddevice を遅延 import する (macOS/Linux 経路専用).
+
+    Windows では呼ばれない想定。万一呼ばれて失敗した場合は分かりやすいエラーにする。
+    """
+    try:
+        import sounddevice as sd
+    except OSError as e:
+        raise SystemExit(
+            f"error: failed to load sounddevice/PortAudio ({e}). "
+            "On Windows use --backend openai (which uses PyAudioWPatch, not sounddevice)."
+        )
+    return sd
 
 from realtime_interpreter.audio import (
     DEVICE_NAME,
@@ -89,28 +107,40 @@ def _is_macos() -> bool:
 def _list_devices() -> None:
     """`--device` に指定できるデバイスを表示する.
 
-    - Windows: WASAPI loopback で「出力デバイス」を録音対象にするため、出力デバイスを列挙
-    - macOS/Linux: 入力デバイス (max_input_channels > 0) を列挙
+    - Windows: PyAudioWPatch で WASAPI loopback デバイス (= 録音対象の出力) を列挙
+      (sounddevice は使わない — ARM64 で DLL がロードできないため)
+    - macOS/Linux: sounddevice で入力デバイス (max_input_channels > 0) を列挙
     """
-    devices = sd.query_devices()
     if _is_windows():
-        default_out = sd.default.device[1]
-        print("Output devices (WASAPI loopback capture targets) for --device:")
-        print()
-        found = False
-        for index, dev in enumerate(devices):
-            if dev["max_output_channels"] <= 0:
-                continue
-            found = True
-            marker = "  <- default-out (used when --device omitted)" if index == default_out else ""
-            print(f"  {index:>2}: {dev['name']} [out={dev['max_output_channels']}]{marker}")
-        if not found:
-            print("  (no output-capable devices found)")
-        print()
-        print("On Windows, system audio is captured via WASAPI loopback on an OUTPUT device.")
-        print("Omit --device to loopback the default speaker, or pass an output device name.")
+        import pyaudiowpatch as pyaudio
+
+        pa = pyaudio.PyAudio()
+        try:
+            wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+            default_out_index = wasapi_info["defaultOutputDevice"]
+            default_out = pa.get_device_info_by_index(default_out_index)
+            print("Loopback capture targets for --device (WASAPI):")
+            print()
+            loopbacks = list(pa.get_loopback_device_info_generator())
+            if not loopbacks:
+                print("  (no WASAPI loopback devices found)")
+            for lb in loopbacks:
+                is_default = default_out["name"] in lb["name"]
+                marker = "  <- matches default output (used when --device omitted)" if is_default else ""
+                print(
+                    f"  [{lb['index']}] {lb['name']} "
+                    f"(in={lb['maxInputChannels']}, rate={int(lb['defaultSampleRate'])})"
+                    f"{marker}"
+                )
+            print()
+            print("On Windows, system audio is captured via WASAPI loopback.")
+            print("Omit --device to loopback the default speaker, or pass a loopback device name.")
+        finally:
+            pa.terminate()
         return
 
+    sd = _load_sounddevice()
+    devices = sd.query_devices()
     default_in = sd.default.device[0]
     print("Input devices selectable via --device (index: name [in channels]):")
     print()
@@ -150,6 +180,7 @@ def _check_input_device(device_name: str) -> None:
     # macOS/Linux: BlackHole 等の入力デバイスを開く。
     # macOS ではスピーカー出力を Multi-Output Device 経由で BlackHole に流す必要があるため、
     # 現在の出力先が Multi-Output でなければ切替を促す。
+    sd = _load_sounddevice()
     default_out = sd.default.device[1]
     output_name = sd.query_devices(default_out)["name"]
     print(f"Input device: {device_name}", file=sys.stderr)
@@ -464,6 +495,11 @@ def _build_backend(
     summary_enabled = args.summary_interval_seconds > 0
     src = normalize_language_code(args.source_lang)
     tgt = normalize_language_code(args.target_lang)
+
+    # sounddevice は Windows では import しない (ARM64 で PortAudio DLL がロードできず、
+    # かつ Windows の各バックエンドは PyAudioWPatch ベースのキャプチャを使うため不要)。
+    # Windows では sd=None を渡す。各バックエンドの Windows 経路は sd を参照しない。
+    sd = None if _is_windows() else _load_sounddevice()
 
     if args.backend == "mlx":
         if args.end_silence_ms <= 0:
