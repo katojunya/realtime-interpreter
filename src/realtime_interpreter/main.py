@@ -8,9 +8,9 @@ target 言語の訳を生成する。バックエンドは TranslatedSegment を
 - 確定セグメント: append-only で永続表示 + ログ + 要約バッファ反映
 
 バックエンド:
-    mlx     ローカル MLX (Gemma 4 + mlx-vlm). 確定単位でしか出力しない (is_partial=False のみ)
-    openai  OpenAI gpt-realtime-translate (WebSocket). delta 単位で in-place 更新
-    openai-chat  OpenAI-compatible Chat Completions REST. ローカル VAD で確定単位出力
+    openai-realtime  OpenAI gpt-realtime-translate (WebSocket). delta 単位で in-place 更新 (既定)
+    openai-chat      OpenAI-compatible Chat Completions REST. ローカル VAD で確定単位出力
+    mlx              ローカル MLX (Gemma 4 + mlx-vlm, macOS のみ). 確定単位で出力
 
 出力形式:
     [mm:ss] <source 転写>
@@ -42,7 +42,7 @@ def _load_sounddevice():
     except OSError as e:
         raise SystemExit(
             f"error: failed to load sounddevice/PortAudio ({e}). "
-            "On Windows use --backend openai (which uses PyAudioWPatch, not sounddevice)."
+            "On Windows use --backend openai-realtime (which uses PyAudioWPatch, not sounddevice)."
         )
     return sd
 
@@ -93,7 +93,7 @@ from realtime_interpreter.translator import DEFAULT_ALIAS, MODEL_PRESETS
 logger = logging.getLogger(__name__)
 
 DEFAULT_SUMMARY_INTERVAL_SECONDS = 60
-SUPPORTED_BACKENDS = ("mlx", "openai", "openai-chat")
+SUPPORTED_BACKENDS = ("openai-realtime", "openai-chat", "mlx")
 
 
 def _is_windows() -> bool:
@@ -213,12 +213,12 @@ def _parse_args() -> argparse.Namespace:
         description = (
             "Low-latency simultaneous interpreter. Default: English→Japanese. "
             "Use --source-lang / --target-lang (aliases: --from / --to, -s / -t) "
-            "to change languages. Backends: local MLX (Gemma 4), OpenAI "
-            "gpt-realtime-translate, or OpenAI-compatible Chat Completions."
+            "to change languages. Backends: OpenAI gpt-realtime-translate, "
+            "OpenAI-compatible Chat Completions, or local MLX (Gemma 4)."
         )
-        backend_choices = SUPPORTED_BACKENDS
-        backend_default = "mlx"
-        backend_help = "Translation backend (default: mlx)"
+        backend_choices = ("openai-realtime", "openai-chat", "mlx")
+        backend_default = "openai-realtime"
+        backend_help = "Translation backend (default: openai-realtime)"
     elif _is_windows():
         description = (
             "Low-latency simultaneous interpreter (Windows: OpenAI realtime or "
@@ -226,21 +226,26 @@ def _parse_args() -> argparse.Namespace:
             "Default: English→Japanese. Use --source-lang / --target-lang "
             "(aliases: --from / --to, -s / -t) to change languages."
         )
-        # Windows では mlx を除外し、WASAPI loopback 対応済みの openai/openai-chat を許可する。
-        backend_choices = ("openai", "openai-chat")
-        backend_default = "openai"
-        backend_help = "Translation backend (Windows default: openai)"
+        # Windows では mlx を除外し、WASAPI loopback 対応済みの openai-realtime/openai-chat を許可する。
+        backend_choices = ("openai-realtime", "openai-chat")
+        backend_default = "openai-realtime"
+        backend_help = "Translation backend (default: openai-realtime)"
     else:
         description = (
             "Low-latency simultaneous interpreter (OpenAI realtime backend). "
             "Default: English→Japanese. Use --source-lang / --target-lang "
             "(aliases: --from / --to, -s / -t) to change languages."
         )
-        backend_choices = ("openai",)
-        backend_default = "openai"
+        backend_choices = ("openai-realtime",)
+        backend_default = "openai-realtime"
         backend_help = "Translation backend"
 
-    parser = argparse.ArgumentParser(description=description)
+    # usage/help の折り返し幅を 80 に固定 (ターミナル幅に依存させない)。
+    # 長いオプションでも 1 行が 80 文字を超えないよう、メタ変数名も短くしている。
+    parser = argparse.ArgumentParser(
+        description=description,
+        formatter_class=lambda prog: argparse.HelpFormatter(prog, width=80),
+    )
     parser.add_argument(
         "--backend",
         choices=backend_choices,
@@ -297,6 +302,131 @@ def _parse_args() -> argparse.Namespace:
         help="List known language codes and exit",
     )
 
+    # --help でのバックエンド別グループ表示順は openai-realtime → openai-chat → mlx。
+    # オプションは --openai-realtime-* (正式) と --openai-rt-* (短縮) の 2 表記を受け付ける。
+    # dest は従来名 (openai_model 等) を維持し、下流コードの参照を変えない。
+    openai_group = parser.add_argument_group("openai-realtime backend")
+    openai_group.add_argument(
+        "--openai-realtime-model",
+        "--openai-rt-model",
+        dest="openai_model",
+        metavar="MODEL",
+        default=DEFAULT_OPENAI_MODEL,
+        help=f"[openai-realtime] Realtime model id (default: {DEFAULT_OPENAI_MODEL!r})",
+    )
+    openai_group.add_argument(
+        "--openai-realtime-debounce-ms",
+        "--openai-rt-debounce-ms",
+        dest="openai_debounce_ms",
+        metavar="MS",
+        type=int,
+        default=TURN_DEBOUNCE_MS,
+        help=(
+            "[openai-realtime] Commit a chunk after delta has been quiet for this many "
+            "milliseconds. Smaller = more frequent (but higher risk of mid-translation "
+            "commit causing EN/JA misalignment). Larger = fewer, longer chunks but "
+            f"properly aligned. (default: {TURN_DEBOUNCE_MS})"
+        ),
+    )
+    openai_group.add_argument(
+        "--openai-realtime-max-segment-seconds",
+        "--openai-rt-max-segment-seconds",
+        dest="openai_max_segment_seconds",
+        metavar="SECS",
+        type=float,
+        default=OPENAI_MAX_SEGMENT_SECONDS,
+        help=(
+            "[openai-realtime] Force-commit a chunk after this many seconds of continuous "
+            "accumulation, even when delta is still arriving. Prevents huge single "
+            "chunks during long monologues. 0 to disable (debounce only). "
+            f"(default: {OPENAI_MAX_SEGMENT_SECONDS})"
+        ),
+    )
+    openai_group.add_argument(
+        "--openai-realtime-summary-model",
+        "--openai-rt-summary-model",
+        dest="openai_summary_model",
+        metavar="MODEL",
+        default=DEFAULT_OPENAI_SUMMARY_MODEL,
+        help=(
+            "[openai-realtime] Chat Completions model used for periodic summaries. "
+            "Requires --summary-interval-seconds > 0. Uses the same OPENAI_API_KEY. "
+            f"(default: {DEFAULT_OPENAI_SUMMARY_MODEL!r})"
+        ),
+    )
+    openai_group.add_argument(
+        "--openai-realtime-api-key",
+        "--openai-rt-api-key",
+        dest="openai_api_key",
+        metavar="KEY",
+        default=None,
+        help=(
+            "[openai-realtime] OpenAI API key. Defaults to the OPENAI_API_KEY "
+            "environment variable (recommended; avoids leaking the key into "
+            "shell history)."
+        ),
+    )
+
+    if openai_chat_available:
+        openai_chat_group = parser.add_argument_group("openai-chat backend")
+        openai_chat_group.add_argument(
+            "--openai-chat-base-url",
+            metavar="URL",
+            default=DEFAULT_OPENAI_CHAT_BASE_URL,
+            help=(
+                "[openai-chat] OpenAI-compatible base URL. "
+                f"(default: {DEFAULT_OPENAI_CHAT_BASE_URL!r})"
+            ),
+        )
+        openai_chat_group.add_argument(
+            "--openai-chat-model",
+            metavar="MODEL",
+            default=DEFAULT_OPENAI_CHAT_MODEL,
+            help=(
+                "[openai-chat] Chat Completions model id. "
+                f"(default: {DEFAULT_OPENAI_CHAT_MODEL!r})"
+            ),
+        )
+        openai_chat_group.add_argument(
+            "--openai-chat-api-key",
+            metavar="TOKEN",
+            default=None,
+            help=(
+                "[openai-chat] Bearer token. Defaults to OPENAI_CHAT_API_KEY, "
+                "then OPENAI_API_KEY, then 'ollama'."
+            ),
+        )
+        openai_chat_group.add_argument(
+            "--openai-chat-timeout-seconds",
+            metavar="SECS",
+            type=float,
+            default=DEFAULT_OPENAI_CHAT_TIMEOUT_SECONDS,
+            help=(
+                "[openai-chat] Per-request timeout in seconds. "
+                f"(default: {DEFAULT_OPENAI_CHAT_TIMEOUT_SECONDS:g})"
+            ),
+        )
+        openai_chat_group.add_argument(
+            "--openai-chat-max-tokens",
+            metavar="N",
+            type=int,
+            default=DEFAULT_OPENAI_CHAT_MAX_TOKENS,
+            help=(
+                "[openai-chat] Max output tokens per audio segment. "
+                f"(default: {DEFAULT_OPENAI_CHAT_MAX_TOKENS})"
+            ),
+        )
+        openai_chat_group.add_argument(
+            "--openai-chat-temperature",
+            metavar="TEMP",
+            type=float,
+            default=DEFAULT_OPENAI_CHAT_TEMPERATURE,
+            help=(
+                "[openai-chat] Sampling temperature. "
+                f"(default: {DEFAULT_OPENAI_CHAT_TEMPERATURE:g})"
+            ),
+        )
+
     # mlx モデル関連オプションは macOS のみ登録. Windows では表示も受付もしない。
     if mlx_available:
         mlx_group = parser.add_argument_group("mlx backend")
@@ -315,10 +445,14 @@ def _parse_args() -> argparse.Namespace:
             help="[mlx] List available model presets and exit",
         )
 
+    # mlx / openai-chat が共有するローカル VAD 区切り設定 (両者ともローカルで発話区切り)。
     if mlx_available or openai_chat_available:
-        local_vad_group = parser.add_argument_group("local VAD segmentation")
+        local_vad_group = parser.add_argument_group(
+            "local VAD segmentation (mlx / openai-chat)"
+        )
         local_vad_group.add_argument(
             "--end-silence-ms",
+            metavar="MS",
             type=int,
             default=END_SILENCE_MS,
             help=(
@@ -329,6 +463,7 @@ def _parse_args() -> argparse.Namespace:
         )
         local_vad_group.add_argument(
             "--max-segment-seconds",
+            metavar="SECS",
             type=float,
             default=MAX_SEGMENT_SECONDS,
             help=(
@@ -338,100 +473,9 @@ def _parse_args() -> argparse.Namespace:
             ),
         )
 
-    openai_group = parser.add_argument_group("openai realtime backend")
-    openai_group.add_argument(
-        "--openai-model",
-        default=DEFAULT_OPENAI_MODEL,
-        help=f"[openai] Realtime model id (default: {DEFAULT_OPENAI_MODEL!r})",
-    )
-    openai_group.add_argument(
-        "--openai-debounce-ms",
-        type=int,
-        default=TURN_DEBOUNCE_MS,
-        help=(
-            "[openai] Commit a chunk after delta has been quiet for this many milliseconds. "
-            "Smaller = more frequent (but higher risk of mid-translation commit causing "
-            "EN/JA misalignment). Larger = fewer, longer chunks but properly aligned. "
-            f"(default: {TURN_DEBOUNCE_MS})"
-        ),
-    )
-    openai_group.add_argument(
-        "--openai-max-segment-seconds",
-        type=float,
-        default=OPENAI_MAX_SEGMENT_SECONDS,
-        help=(
-            "[openai] Force-commit a chunk after this many seconds of continuous "
-            "accumulation, even when delta is still arriving. Prevents huge single "
-            "chunks during long monologues. 0 to disable (debounce only). "
-            f"(default: {OPENAI_MAX_SEGMENT_SECONDS})"
-        ),
-    )
-    openai_group.add_argument(
-        "--openai-summary-model",
-        default=DEFAULT_OPENAI_SUMMARY_MODEL,
-        help=(
-            "[openai] Chat Completions model used for periodic summaries. "
-            "Requires --summary-interval-seconds > 0. Uses the same OPENAI_API_KEY. "
-            f"(default: {DEFAULT_OPENAI_SUMMARY_MODEL!r})"
-        ),
-    )
-
-    if openai_chat_available:
-        openai_chat_group = parser.add_argument_group("openai-chat backend")
-        openai_chat_group.add_argument(
-            "--openai-chat-base-url",
-            default=DEFAULT_OPENAI_CHAT_BASE_URL,
-            help=(
-                "[openai-chat] OpenAI-compatible base URL. "
-                f"(default: {DEFAULT_OPENAI_CHAT_BASE_URL!r})"
-            ),
-        )
-        openai_chat_group.add_argument(
-            "--openai-chat-model",
-            default=DEFAULT_OPENAI_CHAT_MODEL,
-            help=(
-                "[openai-chat] Chat Completions model id. "
-                f"(default: {DEFAULT_OPENAI_CHAT_MODEL!r})"
-            ),
-        )
-        openai_chat_group.add_argument(
-            "--openai-chat-api-key",
-            default=None,
-            help=(
-                "[openai-chat] Bearer token. Defaults to OPENAI_CHAT_API_KEY, "
-                "then OPENAI_API_KEY, then 'ollama'."
-            ),
-        )
-        openai_chat_group.add_argument(
-            "--openai-chat-timeout-seconds",
-            type=float,
-            default=DEFAULT_OPENAI_CHAT_TIMEOUT_SECONDS,
-            help=(
-                "[openai-chat] Per-request timeout in seconds. "
-                f"(default: {DEFAULT_OPENAI_CHAT_TIMEOUT_SECONDS:g})"
-            ),
-        )
-        openai_chat_group.add_argument(
-            "--openai-chat-max-tokens",
-            type=int,
-            default=DEFAULT_OPENAI_CHAT_MAX_TOKENS,
-            help=(
-                "[openai-chat] Max output tokens per audio segment. "
-                f"(default: {DEFAULT_OPENAI_CHAT_MAX_TOKENS})"
-            ),
-        )
-        openai_chat_group.add_argument(
-            "--openai-chat-temperature",
-            type=float,
-            default=DEFAULT_OPENAI_CHAT_TEMPERATURE,
-            help=(
-                "[openai-chat] Sampling temperature. "
-                f"(default: {DEFAULT_OPENAI_CHAT_TEMPERATURE:g})"
-            ),
-        )
-
     parser.add_argument(
         "--summary-interval-seconds",
+        metavar="SECS",
         type=int,
         default=DEFAULT_SUMMARY_INTERVAL_SECONDS,
         help=(
@@ -516,8 +560,8 @@ def _build_backend(
             raise SystemExit(
                 f"error: mlx backend unavailable ({e}). "
                 "The mlx backend requires macOS (Apple Silicon) with mlx-vlm installed. "
-                "On Windows use --backend openai or --backend openai-chat; "
-                "on Linux use --backend openai."
+                "On Windows use --backend openai-realtime or --backend openai-chat; "
+                "on Linux use --backend openai-realtime."
             )
 
         translator = GemmaAudioTranslator(
@@ -543,7 +587,7 @@ def _build_backend(
         )
         return backend, summarizer
 
-    if args.backend == "openai":
+    if args.backend == "openai-realtime":
         if args.openai_debounce_ms <= 0:
             raise SystemExit("error: --openai-debounce-ms must be positive")
         if args.openai_max_segment_seconds < 0:
@@ -551,6 +595,7 @@ def _build_backend(
         backend = OpenAIRealtimeBackend(
             sd_module=sd,
             device_name=args.device,
+            api_key=args.openai_api_key,
             model=args.openai_model,
             turn_debounce_ms=args.openai_debounce_ms,
             max_segment_seconds=args.openai_max_segment_seconds,
@@ -560,6 +605,7 @@ def _build_backend(
         summarizer = (
             OpenAIChatSummarizer(
                 model=args.openai_summary_model,
+                api_key=args.openai_api_key,
                 source_lang=src,
                 target_lang=tgt,
             )
@@ -638,7 +684,7 @@ def _emit_settings(args: argparse.Namespace) -> None:
             f"summary={summary_str}",
             file=sys.stderr,
         )
-    elif args.backend == "openai":
+    elif args.backend == "openai-realtime":
         max_seg_str = (
             f"{args.openai_max_segment_seconds}s"
             if args.openai_max_segment_seconds > 0
@@ -651,7 +697,7 @@ def _emit_settings(args: argparse.Namespace) -> None:
         else:
             summary_label = "off"
         print(
-            f"Backend: openai ({args.openai_model}) | "
+            f"Backend: openai-realtime ({args.openai_model}) | "
             f"Lang: {lang_label} | "
             f"debounce={args.openai_debounce_ms}ms, "
             f"max_segment={max_seg_str} | "

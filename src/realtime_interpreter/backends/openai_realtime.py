@@ -247,8 +247,8 @@ class OpenAIRealtimeBackend:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         if not self._api_key:
             raise ValueError(
-                "OPENAI_API_KEY is not set. "
-                "Set the env var or pass --openai-api-key (not recommended)."
+                "No OpenAI API key. Set the OPENAI_API_KEY environment variable, "
+                "or pass --openai-realtime-api-key (alias --openai-rt-api-key)."
             )
         self._model = model
         # 内部表現は秒. CLI は ms で受け取って秒に変換するためここでも秒に直す。

@@ -6,11 +6,72 @@
 
 | バックエンド | 実装 | 特徴 |
 |---|---|---|
-| `mlx` (既定) | mlx-vlm + Gemma 4 (ローカル) | オフライン・無料・Apple Silicon ネイティブ |
-| `openai` | OpenAI gpt-realtime-translate (WebSocket) | クラウド・$0.034/分・低レイテンシ・サーバ VAD |
-| `openai-chat` | OpenAI 互換 Chat Completions REST (Ollama 等) | ローカル VAD で区切った WAV を直接マルチモーダル LLM に入力 |
+| `openai-realtime` (既定) | OpenAI gpt-realtime-translate (WebSocket) | クラウド・$0.034/分・低レイテンシ・サーバ VAD |
+| `openai-chat` | OpenAI 互換 Chat Completions REST | ローカル VAD で区切った WAV を直接マルチモーダル LLM に入力。ローカル動作のOllamaの利用が標準設定 |
+| `mlx` (macOSのみ) | mlx-vlm + Gemma 4 (ローカル) | オフライン・無料・Apple Silicon ネイティブ |
 
-本ツールは **Whisper を経由せず** Gemma 4 (mlx-vlm) に音声を直接入力し、1 回の推論で **英語転写と日本語訳を同時生成** します。OpenAI Realtime バックエンドではサーバ側で同等の処理が走ります。`openai-chat` バックエンドでは Ollama 等の OpenAI 互換 REST API に WAV 音声を直接渡します。
+本ツールは **Whisper を経由せず** Gemma 4 (mlx-vlm) に音声を直接入力し、1 回の推論で **英文の文字起こしと日本語訳を同時生成** します。OpenAI Realtime バックエンドではサーバ側で同等の処理が走ります。`openai-chat` バックエンドのデフォルトは、ローカルの Ollama 等の OpenAI 互換の REST API に WAV 音声を直接渡す設定です。エンドポイント変更することでOpenAIのサービスを使うことも可能です。
+
+## クイックスタート
+
+まず 1 回動かすための最短手順です。詳細 (言語切替・モデル選択・チューニング等) は後続の各節を参照してください。
+
+### 1. uv をインストール
+
+Python 本体は uv が自動で用意するため、別途インストールは不要です。管理者権限も不要です。
+
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+インストール後は**新しいシェルを開いて** PATH を反映させてください (`uv --version` で確認)。
+
+### 2. 依存をインストール
+
+リポジトリのルートで:
+
+```bash
+uv sync
+```
+
+プラットフォームに応じて必要な依存だけが入ります (macOS は mlx 系も込み、Windows/Linux はスキップ)。
+
+### 3. まず 1 回動かす
+
+お使いの環境に応じて、いちばん手軽な方法でどうぞ。
+
+**macOS — まず音声ファイルで翻訳を確認** (オーディオ設定不要・無料・ローカル):
+
+```bash
+uv run python scripts/smoke_test.py samples/test_en_librispeech.flac
+```
+
+英文と日本語訳が表示されれば成功です。初回は Gemma 4 モデル (約 5GB) のダウンロードが走ります。ライブ翻訳 (`uv run realtime-interpreter`) には BlackHole の設定が必要です → [前提条件](#前提条件)。
+
+**Windows — クラウドで即実行** (追加のオーディオ設定不要):
+
+```powershell
+$env:OPENAI_API_KEY = "sk-..."
+uv run realtime-interpreter --backend openai-realtime
+```
+
+ブラウザや Zoom 等で英語音声を再生すると、その音が WASAPI ループバックで取り込まれ翻訳が流れます。スピーカーからは普段どおり音が聞こえたままです。
+
+**完全オフライン / ローカル LLM** (Ollama 等の OpenAI 互換サーバ・APIキー不要):
+
+```bash
+ollama serve            # 別ターミナルで起動しておく
+ollama pull gemma4:e4b
+uv run realtime-interpreter --backend openai-chat
+```
+
+> うまく動いたら、以降の節で **言語の切り替え**・**バックエンドの選択**・**チャンクサイズの調整**などを確認してください。
 
 ## 出力フォーマット
 
@@ -24,7 +85,7 @@ VAD で検出された発話セグメント単位で、確定した結果を 2 �
 [00:27] 私たちは世界最大級のインターネットサービスを構築しており、その多くは AWS 上で稼働しています。
 ```
 
-英語転写はグレー、日本語訳は通常色で表示されます。同じ `[mm:ss]` がペアで付くのは、両者が同じセグメントを指すためです (時刻はセグメント開始時)。
+英文の文字起こしはグレー、日本語訳は通常色で表示されます。同じ `[mm:ss]` がペアで付くのは、両者が同じセグメントを指すためです (時刻はセグメント開始時)。
 
 ## アーキテクチャ
 
@@ -40,7 +101,7 @@ BlackHole 2ch
 
   [60秒ごと]
   → Summarizer (Gemma 4 をテキスト専用で再利用)
-       過去 60 秒の英語転写から日本語要約を生成
+       過去 60 秒の英文の文字起こしから日本語要約を生成
   → 要約ブロックを表示 + ログ記録
 ```
 
@@ -133,7 +194,7 @@ uv sync
 `uv sync` はプラットフォームを自動判定します:
 - **macOS**: mlx-vlm / silero-vad-lite 等を含む全依存をインストール (mlx / openai / openai-chat 利用可)
 - **Windows**: mlx 系はスキップされ、openai / openai-chat に必要な PyAudioWPatch と silero-vad-lite をインストール
-- **Linux**: mlx 系はスキップされ、openai バックエンドに必要な依存のみインストール
+- **Linux**: mlx 系はスキップされ、openai-realtime バックエンドに必要な依存のみインストール
 
 (mlx バックエンド初回実行時に Gemma 4 のモデルファイル (約 5GB) が HuggingFace から自動ダウンロードされます。)
 
@@ -144,13 +205,13 @@ OpenAI Realtime を使う場合:
 ```powershell
 # PowerShell
 $env:OPENAI_API_KEY = "sk-..."
-uv run realtime-interpreter --backend openai
+uv run realtime-interpreter --backend openai-realtime
 ```
 
 ```cmd
 :: コマンドプロンプト
 set OPENAI_API_KEY=sk-...
-uv run realtime-interpreter --backend openai
+uv run realtime-interpreter --backend openai-realtime
 ```
 
 Ollama 等の OpenAI 互換 REST API を使う場合:
@@ -178,7 +239,7 @@ uv run realtime-interpreter
 
 ```bash
 export OPENAI_API_KEY=sk-...
-uv run realtime-interpreter --backend openai
+uv run realtime-interpreter --backend openai-realtime
 ```
 
 OpenAI バックエンドは **WebSocket ベースのストリーミング** で、サーバ側 VAD によって自動的に発話の切れ目が検出されます。要約も同じ API キーで OpenAI Chat Completions 経由 (既定 `gpt-5-mini`) で生成されます。
@@ -221,7 +282,7 @@ uv run realtime-interpreter \
 | `--list-models` | プリセット一覧を表示して終了 | — | mlx |
 | `--end-silence-ms` | この長さの無音で発話セグメントを区切る | `800` | mlx / openai-chat |
 | `--max-segment-seconds` | 連続発話時のセグメント最大長 (秒) | `8.0` | mlx / openai-chat |
-| `--openai-model` | Realtime モデル ID | `gpt-realtime-translate` | openai |
+| `--openai-model` | Realtime モデル ID | `gpt-realtime-translate` | openai-realtime |
 | `--openai-chat-base-url` | OpenAI 互換 API の base URL | `http://localhost:11434/v1` | openai-chat |
 | `--openai-chat-model` | Chat Completions モデル ID | `gemma4:e4b` | openai-chat |
 | `--openai-chat-api-key` | Bearer token. 未指定時は `OPENAI_CHAT_API_KEY` → `OPENAI_API_KEY` → `ollama` | — | openai-chat |
@@ -307,7 +368,7 @@ uv run realtime-interpreter
 
 ## 定期要約 (1 分ごと)
 
-既定で 60 秒ごとに、過去 60 秒間の **英語転写** を日本語で要約してターミナルに表示します。要約モデルは翻訳と同じ Gemma 4 をテキスト専用モードで再利用するため、追加 RAM は不要です。
+既定で 60 秒ごとに、過去 60 秒間の **英文の文字起こし** を日本語で要約してターミナルに表示します。要約モデルは翻訳と同じ Gemma 4 をテキスト専用モードで再利用するため、追加 RAM は不要です。
 
 ```
 [01:23] We're driven by the idea that the products we create should help unleash creativity.
@@ -409,7 +470,7 @@ uv run pytest
 | 項目 | 単価 | 1 時間あたり |
 |---|---|---|
 | `gpt-realtime-translate` (翻訳) | $0.034/分 | 約 $2.04 |
-| `gpt-realtime-whisper` (英語転写) | $0.017/分 | 約 $1.02 |
+| `gpt-realtime-whisper` (英文の文字起こし) | $0.017/分 | 約 $1.02 |
 | `gpt-5-mini` (要約, 60s ごと) | 約 $0.0003/回 | 約 **$0.02** |
 | **合計** | | **約 $3.08 / 時** |
 
