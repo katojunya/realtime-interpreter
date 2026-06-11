@@ -188,7 +188,7 @@ def _check_input_device(device_name: str) -> None:
         print(
             f"⚠ Current system output is {output_name!r}. "
             "Switch macOS output to a Multi-Output Device including BlackHole 2ch "
-            "so audio reaches this program. (Use --no-device-check to skip this prompt.)",
+            "so audio reaches this program. (This prompt appears only with --device-check.)",
             file=sys.stderr,
         )
         if sys.platform == "darwin":
@@ -258,11 +258,11 @@ def _parse_args() -> argparse.Namespace:
         help="List available audio devices and exit",
     )
     parser.add_argument(
-        "--no-device-check",
+        "--device-check",
         action="store_true",
         help=(
-            "Skip the startup output-device check / Multi-Output prompt. "
-            "Use when you manage audio routing yourself."
+            "Check the output-device routing at startup and prompt to switch to a "
+            "Multi-Output Device if needed (macOS). Skipped by default."
         ),
     )
     parser.add_argument(
@@ -776,10 +776,12 @@ def main() -> None:
         print("error: --summary-interval-seconds must be >= 0", file=sys.stderr)
         sys.exit(2)
 
-    if args.no_device_check:
-        print(f"Input device: {args.device}", file=sys.stderr)
-    else:
+    # 既定はチェックなし (デバイス名の表示のみ)。--device-check 指定時のみ
+    # 出力ルーティングの確認プロンプトを出す。
+    if args.device_check:
         _check_input_device(args.device)
+    else:
+        print(f"Input device: {args.device}", file=sys.stderr)
 
     try:
         backend, summarizer = _build_backend(args)

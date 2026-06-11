@@ -271,7 +271,7 @@ uv run realtime-interpreter \
 | `--backend` | `mlx` / `openai` / `openai-chat` | macOS: `mlx`, Windows: `openai` | 共通 |
 | `--device` | 入力デバイス名 (部分一致) | `BlackHole 2ch` | 共通 |
 | `--list-devices` | オーディオデバイス一覧を表示して終了 | — | 共通 |
-| `--no-device-check` | 起動時の出力デバイス確認プロンプトをスキップ (ルーティングを自分で管理する場合) | (off) | 共通 |
+| `--device-check` | 起動時に出力デバイスのルーティングを確認し、必要なら Multi-Output Device への切替を促す (macOS)。既定ではスキップ | (off) | 共通 |
 | `--source-lang` / `--from` / `-s` | 音声の言語 (ISO 639-1) | `en` | 共通 |
 | `--target-lang` / `--to` / `-t` | 翻訳先の言語 (ISO 639-1) | `ja` | 共通 |
 | `--list-languages` | 既知の言語コードを表示して終了 | — | 共通 |
