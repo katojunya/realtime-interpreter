@@ -161,11 +161,14 @@ def _list_devices() -> None:
     print("speaker audio into BlackHole so this program can read it as an input).")
 
 
-def _check_input_device(device_name: str) -> None:
-    """起動時にキャプチャ対象を表示し、必要なら設定を促す (platform 別)."""
+def _print_capture_target(device_name: str) -> None:
+    """起動時にキャプチャ対象を platform に応じた表現で表示する.
+
+    Windows: WASAPI loopback (既定スピーカー or 指定出力デバイス) を案内。
+             macOS 用デフォルト名 (BlackHole 2ch) をそのまま出さない。
+    macOS/Linux: 入力デバイス名を表示。
+    """
     if _is_windows():
-        # Windows は WASAPI loopback. 既定スピーカー (or 指定出力) の音を取り込む。
-        # 追加設定は不要なので、対象だけ表示して続行。
         if not device_name or device_name == DEVICE_NAME:
             target = "default output device (speaker)"
         else:
@@ -175,6 +178,15 @@ def _check_input_device(device_name: str) -> None:
             "Play audio from any app to translate it.",
             file=sys.stderr,
         )
+    else:
+        print(f"Input device: {device_name}", file=sys.stderr)
+
+
+def _check_input_device(device_name: str) -> None:
+    """起動時にキャプチャ対象を表示し、必要なら設定を促す (platform 別)."""
+    if _is_windows():
+        # Windows は WASAPI loopback. 追加設定は不要なので、対象だけ表示して続行。
+        _print_capture_target(device_name)
         return
 
     # macOS/Linux: BlackHole 等の入力デバイスを開く。
@@ -776,12 +788,12 @@ def main() -> None:
         print("error: --summary-interval-seconds must be >= 0", file=sys.stderr)
         sys.exit(2)
 
-    # 既定はチェックなし (デバイス名の表示のみ)。--device-check 指定時のみ
-    # 出力ルーティングの確認プロンプトを出す。
+    # 既定はチェックなし (platform に応じたキャプチャ対象の表示のみ)。
+    # --device-check 指定時のみ出力ルーティングの確認プロンプトを出す。
     if args.device_check:
         _check_input_device(args.device)
     else:
-        print(f"Input device: {args.device}", file=sys.stderr)
+        _print_capture_target(args.device)
 
     try:
         backend, summarizer = _build_backend(args)
