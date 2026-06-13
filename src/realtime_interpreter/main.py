@@ -23,6 +23,7 @@ import argparse
 import logging
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -93,6 +94,10 @@ from realtime_interpreter.translator import DEFAULT_ALIAS, MODEL_PRESETS
 logger = logging.getLogger(__name__)
 
 DEFAULT_SUMMARY_INTERVAL_SECONDS = 60
+# セッション最大時間 (コスト安全弁). 既定 24 時間. 0 で無制限。
+# 長時間バックエンド (gemini/openai realtime) は再接続しながら走り続けるため、
+# 無人運用での課金暴走を防ぐ上限として設ける。
+DEFAULT_MAX_SESSION_SECONDS = 24 * 60 * 60  # 86400
 SUPPORTED_BACKENDS = ("openai-realtime", "openai-chat", "mlx", "gemini-realtime")
 
 DEFAULT_GEMINI_MODEL = "models/gemini-3.5-live-translate-preview"
@@ -565,6 +570,17 @@ def _parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--max-session-seconds",
+        metavar="MAX",
+        type=int,
+        default=DEFAULT_MAX_SESSION_SECONDS,
+        help=(
+            "Stop automatically after this many seconds (cost safety valve for "
+            "unattended long sessions). 0 = unlimited. "
+            f"(default: {DEFAULT_MAX_SESSION_SECONDS} = 24h)"
+        ),
+    )
+    parser.add_argument(
         "--log-dir",
         default="logs",
         help="Directory for session logs (default: logs)",
@@ -918,6 +934,9 @@ def main() -> None:
     if args.summary_interval_seconds < 0:
         print("error: --summary-interval-seconds must be >= 0", file=sys.stderr)
         sys.exit(2)
+    if args.max_session_seconds < 0:
+        print("error: --max-session-seconds must be >= 0 (0 = unlimited)", file=sys.stderr)
+        sys.exit(2)
 
     # 既定はチェックなし (platform に応じたキャプチャ対象の表示のみ)。
     # --device-check 指定時のみ出力ルーティングの確認プロンプトを出す。
@@ -952,10 +971,30 @@ def main() -> None:
         else None
     )
 
+    # コスト安全弁: 既定 24h で自動停止. 0 = 無制限。
+    # セグメント受信ごとに経過時間を確認し、上限到達でループを抜ける
+    # (無音中は次セグメント到着時に判定 = 多少のズレは許容範囲)。
+    session_deadline = (
+        None
+        if args.max_session_seconds == 0
+        else time.monotonic() + args.max_session_seconds
+    )
+
     try:
         with backend, StreamingRenderer() as renderer:
             renderer.update_status("● Listening...")
             for seg in backend.stream_segments():
+                if session_deadline is not None and time.monotonic() >= session_deadline:
+                    logger.info(
+                        "max-session-seconds reached (%ds); stopping.",
+                        args.max_session_seconds,
+                    )
+                    print(
+                        f"\n--max-session-seconds ({args.max_session_seconds}s) reached. "
+                        "Stopping. (pass 0 for unlimited)",
+                        file=sys.stderr,
+                    )
+                    break
                 ts = format_offset(seg.start_offset_seconds)
                 if seg.is_partial:
                     # in-place 更新. ログ・要約バッファには触らない。
