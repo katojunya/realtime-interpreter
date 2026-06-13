@@ -22,5 +22,8 @@ logs/
 # downloaded test samples (large binaries)
 samples/
 
+# benchmark inputs (large video/audio test sources, multi-GB)
+benchmark/
+
 # OS
 .DS_Store

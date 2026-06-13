@@ -46,6 +46,13 @@ OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime/translations"
 OPENAI_SAMPLE_RATE = 24000
 INPUT_TRANSCRIPTION_MODEL = "gpt-realtime-whisper"
 
+# OpenAI Realtime API は 1 接続あたり最大 60 分でサーバ側から切断される。
+# その手前 (PROACTIVE) で自分から新しい接続へ張り替えることで、ハード制限到達による
+# 切れ目をほぼゼロにする。到達後の切断 (REACTIVE) やネット瞬断も recv_loop が拾って
+# 同じ再接続経路で復帰する。OpenAI Realtime にセッション再開ハンドルは無いため、
+# 再接続は新規セッションの張り直し (要約履歴はアプリ側保持なので継続)。
+OPENAI_PROACTIVE_RECONNECT_SECONDS = 55 * 60
+
 # delta が来なくなってからこのミリ秒経過 → ターン終了とみなして commit.
 # このモデル (gpt-realtime-translate) は EN 1 文を JA 複数文 (例: 挨拶を独立文として
 # 切ってから本文を続ける) で訳すことがあるため、文単位での即時 commit を行うと
@@ -260,7 +267,13 @@ class OpenAIRealtimeBackend:
 
         self._audio_queue: queue.Queue[np.ndarray] = queue.Queue()
         self._segment_queue: queue.Queue[TranslatedSegment] = queue.Queue()
+        # _stop_event: セッションを恒久終了する (ユーザ Ctrl+C or 復旧不能エラー)。
+        # _closing:    ユーザ起因の終了のみ (サーバ切断と区別するため)。
         self._stop_event = threading.Event()
+        self._closing = threading.Event()
+        self._reconnecting = threading.Event()  # 再接続中は送信を止める
+        self._ws_lock = threading.Lock()         # ws の差し替えを保護
+        self._connected_at: float = 0.0          # 現接続を確立した monotonic 時刻
 
         # 音声レベルメータ (デバッグ目的)
         self._level_max: float = 0.0
@@ -304,6 +317,8 @@ class OpenAIRealtimeBackend:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
+        # ユーザ起因の終了. _closing を先に立てて「サーバ切断ではない」と区別する。
+        self._closing.set()
         self._stop_event.set()
         try:
             if self._stream is not None:
@@ -323,8 +338,9 @@ class OpenAIRealtimeBackend:
         except Exception:
             logger.debug("pyaudio terminate failed", exc_info=True)
         try:
-            if self._ws is not None:
-                self._ws.close()
+            with self._ws_lock:
+                if self._ws is not None:
+                    self._ws.close()
         except Exception:
             logger.debug("ws close failed", exc_info=True)
         for t in (self._send_thread, self._recv_thread, self._emit_thread):
@@ -358,6 +374,7 @@ class OpenAIRealtimeBackend:
                 f"Authorization: Bearer {self._api_key}",
             ],
         )
+        self._connected_at = time.monotonic()
         logger.info("connected to %s", url)
 
     def _send_session_config(self) -> None:
@@ -475,19 +492,49 @@ class OpenAIRealtimeBackend:
 
     def _send_loop(self) -> None:
         while not self._stop_event.is_set():
+            # プロアクティブ再接続: 60分ハード制限の手前で自分から ws を閉じ、
+            # recv_loop の再接続経路に乗せて切れ目なく新セッションへ張り替える。
+            self._maybe_proactive_reconnect()
             try:
                 chunk = self._audio_queue.get(timeout=0.1)
             except queue.Empty:
                 self._maybe_log_level()
                 continue
+            # 再接続中は送信しない (まだ ws が無効). 古い音声は捨ててバックログを防ぐ。
+            if self._reconnecting.is_set():
+                continue
             self._update_level(chunk)
             try:
                 self._send_audio_chunk(chunk)
             except Exception:
-                logger.exception("audio send failed")
-                self._stop_event.set()
-                return
+                # 切断由来の失敗で send_loop を殺さない。recv_loop が再接続を駆動するので、
+                # ここでは少し待って次チャンクへ進む (再接続完了後に送信再開)。
+                if self._closing.is_set() or self._stop_event.is_set():
+                    return
+                logger.debug("audio send failed (will resume after reconnect)")
+                time.sleep(0.1)
+                continue
             self._maybe_log_level()
+
+    def _maybe_proactive_reconnect(self) -> None:
+        """接続が 60 分制限に近づいたら、サーバ切断を待たずに自分から張り替える.
+
+        ws を閉じるだけで実際の再接続は recv_loop が駆動する (再接続経路を一本化)。
+        _reconnecting を先に立てて送信を止め、二重発火も防ぐ。
+        """
+        if self._reconnecting.is_set() or self._connected_at == 0.0:
+            return
+        if time.monotonic() - self._connected_at < OPENAI_PROACTIVE_RECONNECT_SECONDS:
+            return
+        logger.info("proactive reconnect (approaching 60-min connection limit)")
+        self._reconnecting.set()
+        self._flush_pending_on_disconnect()
+        with self._ws_lock:
+            try:
+                if self._ws is not None:
+                    self._ws.close()  # recv_loop が検知して _reconnect() を実行
+            except Exception:
+                logger.debug("proactive ws close failed", exc_info=True)
 
     def _send_audio_chunk(self, audio: np.ndarray) -> None:
         pcm16 = np.clip(audio, -1.0, 1.0)
@@ -536,8 +583,16 @@ class OpenAIRealtimeBackend:
             try:
                 raw = self._ws.recv()
             except Exception:
-                if not self._stop_event.is_set():
-                    logger.exception("ws recv failed")
+                # ユーザ起因の終了なら静かに抜ける。
+                if self._closing.is_set() or self._stop_event.is_set():
+                    return
+                # サーバ切断 (60分制限到達 等) or プロアクティブ close。
+                # 進行中ターンを確定してから新セッションを張り直す。
+                logger.info("OpenAI connection lost; attempting reconnect...")
+                self._flush_pending_on_disconnect()
+                if self._reconnect():
+                    continue  # 新しい ws で受信再開
+                logger.error("OpenAI reconnection failed; stopping.")
                 self._stop_event.set()
                 return
             if not raw:
@@ -548,6 +603,48 @@ class OpenAIRealtimeBackend:
                 logger.warning("non-JSON ws frame: %r", raw[:200])
                 continue
             self._handle_event(event)
+
+    def _flush_pending_on_disconnect(self) -> None:
+        """切断時に進行中ターンを確定して取りこぼしを防ぐ."""
+        with self._pending_lock:
+            if self._pending_turn is not None and self._pending_turn.has_content():
+                self._emit_pending_locked()
+
+    def _reconnect(self, max_attempts: int = 5) -> bool:
+        """新しい WebSocket を張り直して session config を再送する.
+
+        成功で True. closing/stop が立ったら False を返して諦める。
+        指数バックオフ (0.5, 1, 2, 4, 8 秒上限) でリトライ。recv_loop からのみ呼ぶ。
+        OpenAI Realtime にセッション再開ハンドルは無いので新規セッションになる。
+        """
+        self._reconnecting.set()
+        try:
+            delay = 0.5
+            for attempt in range(1, max_attempts + 1):
+                if self._closing.is_set() or self._stop_event.is_set():
+                    return False
+                try:
+                    with self._ws_lock:
+                        try:
+                            if self._ws is not None:
+                                self._ws.close()
+                        except Exception:
+                            pass
+                        self._open_websocket()
+                        self._send_session_config()
+                    logger.info("OpenAI reconnected (attempt %d)", attempt)
+                    return True
+                except Exception:
+                    logger.warning(
+                        "OpenAI reconnect attempt %d/%d failed; retrying in %.1fs",
+                        attempt, max_attempts, delay,
+                    )
+                    if self._stop_event.wait(timeout=delay):
+                        return False
+                    delay = min(delay * 2, 8.0)
+            return False
+        finally:
+            self._reconnecting.clear()
 
     def _handle_event(self, event: dict) -> None:
         etype = event.get("type", "")
