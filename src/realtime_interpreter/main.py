@@ -1040,7 +1040,6 @@ def main() -> None:
         # Commit any remaining final segments left in the queue (e.g. emitted during shutdown)
         if hasattr(backend, "_segment_queue"):
             try:
-                import time
                 time.sleep(0.1)
                 while not backend._segment_queue.empty():
                     seg = backend._segment_queue.get_nowait()
