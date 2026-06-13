@@ -449,3 +449,5 @@ uv run pytest
 ## ライセンス
 
 MIT
+
+本プロジェクトは [SatoshiMoriyama/live-translate](https://github.com/SatoshiMoriyama/live-translate) (realtime-transcriber, MIT License) を基に開始しました。
