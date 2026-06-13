@@ -1,0 +1,26 @@
+# API keys / secrets (never commit)
+.apikeys
+*.apikey
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# uv / virtualenv
+.venv/
+
+# build artifacts
+dist/
+build/
+
+# session logs / debug dumps (generated at runtime)
+logs/
+
+# downloaded test samples (large binaries)
+samples/
+
+# OS
+.DS_Store
