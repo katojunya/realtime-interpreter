@@ -93,7 +93,12 @@ from realtime_interpreter.translator import DEFAULT_ALIAS, MODEL_PRESETS
 logger = logging.getLogger(__name__)
 
 DEFAULT_SUMMARY_INTERVAL_SECONDS = 60
-SUPPORTED_BACKENDS = ("openai-realtime", "openai-chat", "mlx")
+SUPPORTED_BACKENDS = ("openai-realtime", "openai-chat", "mlx", "gemini-realtime")
+
+DEFAULT_GEMINI_MODEL = "models/gemini-3.5-live-translate-preview"
+DEFAULT_GEMINI_SUMMARY_MODEL = "gemini-3.5-flash"
+DEFAULT_GEMINI_DEBOUNCE_MS = 800
+DEFAULT_GEMINI_MAX_SEGMENT_SECONDS = 8.0
 
 
 def _is_windows() -> bool:
@@ -226,29 +231,29 @@ def _parse_args() -> argparse.Namespace:
             "Low-latency simultaneous interpreter. Default: English→Japanese. "
             "Use --source-lang / --target-lang (aliases: --from / --to, -s / -t) "
             "to change languages. Backends: OpenAI gpt-realtime-translate, "
-            "OpenAI-compatible Chat Completions, or local MLX (Gemma 4)."
+            "OpenAI-compatible Chat Completions, local MLX (Gemma 4), "
+            "or Gemini Multimodal Live API."
         )
-        backend_choices = ("openai-realtime", "openai-chat", "mlx")
+        backend_choices = ("openai-realtime", "openai-chat", "mlx", "gemini-realtime")
         backend_default = "openai-realtime"
         backend_help = "Translation backend (default: openai-realtime)"
     elif _is_windows():
         description = (
-            "Low-latency simultaneous interpreter (Windows: OpenAI realtime or "
-            "OpenAI-compatible Chat Completions). "
+            "Low-latency simultaneous interpreter (Windows: OpenAI realtime, "
+            "OpenAI-compatible Chat Completions, or Gemini Live API). "
             "Default: English→Japanese. Use --source-lang / --target-lang "
             "(aliases: --from / --to, -s / -t) to change languages."
         )
-        # Windows では mlx を除外し、WASAPI loopback 対応済みの openai-realtime/openai-chat を許可する。
-        backend_choices = ("openai-realtime", "openai-chat")
+        backend_choices = ("openai-realtime", "openai-chat", "gemini-realtime")
         backend_default = "openai-realtime"
         backend_help = "Translation backend (default: openai-realtime)"
     else:
         description = (
-            "Low-latency simultaneous interpreter (OpenAI realtime backend). "
+            "Low-latency simultaneous interpreter. "
             "Default: English→Japanese. Use --source-lang / --target-lang "
             "(aliases: --from / --to, -s / -t) to change languages."
         )
-        backend_choices = ("openai-realtime",)
+        backend_choices = ("openai-realtime", "gemini-realtime")
         backend_default = "openai-realtime"
         backend_help = "Translation backend"
 
@@ -439,6 +444,63 @@ def _parse_args() -> argparse.Namespace:
             ),
         )
 
+    gemini_group = parser.add_argument_group("gemini-realtime backend")
+    gemini_group.add_argument(
+        "--gemini-realtime-model",
+        "--gemini-rt-model",
+        dest="gemini_model",
+        metavar="MODEL",
+        default=DEFAULT_GEMINI_MODEL,
+        help=f"[gemini-realtime] Gemini Live model id (default: {DEFAULT_GEMINI_MODEL!r})",
+    )
+    gemini_group.add_argument(
+        "--gemini-realtime-api-key",
+        "--gemini-rt-api-key",
+        dest="gemini_api_key",
+        metavar="KEY",
+        default=None,
+        help=(
+            "[gemini-realtime] Gemini API key. Defaults to the GEMINI_API_KEY "
+            "environment variable."
+        ),
+    )
+    gemini_group.add_argument(
+        "--gemini-realtime-summary-model",
+        "--gemini-rt-summary-model",
+        dest="gemini_summary_model",
+        metavar="MODEL",
+        default=DEFAULT_GEMINI_SUMMARY_MODEL,
+        help=(
+            "[gemini-realtime] Model used for periodic summaries. "
+            "Requires --summary-interval-seconds > 0. Uses the same GEMINI_API_KEY. "
+            f"(default: {DEFAULT_GEMINI_SUMMARY_MODEL!r})"
+        ),
+    )
+    gemini_group.add_argument(
+        "--gemini-realtime-debounce-ms",
+        "--gemini-rt-debounce-ms",
+        dest="gemini_debounce_ms",
+        type=int,
+        metavar="MS",
+        default=DEFAULT_GEMINI_DEBOUNCE_MS,
+        help=(
+            f"[gemini-realtime] Silence duration in milliseconds to commit "
+            f"current segment. (default: {DEFAULT_GEMINI_DEBOUNCE_MS}ms)"
+        ),
+    )
+    gemini_group.add_argument(
+        "--gemini-realtime-max-segment-seconds",
+        "--gemini-rt-max-segment-seconds",
+        dest="gemini_max_segment_seconds",
+        type=float,
+        metavar="SECONDS",
+        default=DEFAULT_GEMINI_MAX_SEGMENT_SECONDS,
+        help=(
+            "[gemini-realtime] Force-commit segment duration to split long monologue "
+            f"chunks. 0 to disable. (default: {DEFAULT_GEMINI_MAX_SEGMENT_SECONDS}s)"
+        ),
+    )
+
     # mlx モデル関連オプションは macOS のみ登録. Windows では表示も受付もしない。
     if mlx_available:
         mlx_group = parser.add_argument_group("mlx backend")
@@ -626,6 +688,37 @@ def _build_backend(
         )
         return backend, summarizer
 
+    if args.backend == "gemini-realtime":
+        if args.gemini_debounce_ms <= 0:
+            raise SystemExit("error: --gemini-debounce-ms must be positive")
+        if args.gemini_max_segment_seconds < 0:
+            raise SystemExit("error: --gemini-max-segment-seconds must be >= 0 (0 disables)")
+
+        from realtime_interpreter.backends.gemini_realtime import GeminiRealtimeBackend
+        from realtime_interpreter.summarizer import GeminiRESTSummarizer
+
+        backend = GeminiRealtimeBackend(
+            sd_module=sd,
+            device_name=args.device,
+            api_key=args.gemini_api_key,
+            model=args.gemini_model,
+            turn_debounce_ms=args.gemini_debounce_ms,
+            max_segment_seconds=args.gemini_max_segment_seconds,
+            source_lang=src,
+            target_lang=tgt,
+        )
+        summarizer = (
+            GeminiRESTSummarizer(
+                model=args.gemini_summary_model,
+                api_key=args.gemini_api_key,
+                source_lang=src,
+                target_lang=tgt,
+            )
+            if summary_enabled
+            else None
+        )
+        return backend, summarizer
+
     if args.backend == "openai-chat":
         if args.end_silence_ms <= 0:
             raise SystemExit("error: --end-silence-ms must be positive")
@@ -716,6 +809,26 @@ def _emit_settings(args: argparse.Namespace) -> None:
             f"summary={summary_label}",
             file=sys.stderr,
         )
+    elif args.backend == "gemini-realtime":
+        if args.summary_interval_seconds > 0:
+            summary_label = (
+                f"every {args.summary_interval_seconds}s ({args.gemini_summary_model})"
+            )
+        else:
+            summary_label = "off"
+        max_seg_str = (
+            f"{args.gemini_max_segment_seconds}s"
+            if args.gemini_max_segment_seconds > 0
+            else "off"
+        )
+        print(
+            f"Backend: gemini-realtime ({args.gemini_model}) | "
+            f"Lang: {lang_label} | "
+            f"debounce={args.gemini_debounce_ms}ms, "
+            f"max_segment={max_seg_str} | "
+            f"summary={summary_label}",
+            file=sys.stderr,
+        )
     elif args.backend == "openai-chat":
         print(
             f"Backend: openai-chat ({args.openai_chat_model}) | "
@@ -778,11 +891,26 @@ def main() -> None:
         _list_devices()
         return
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.WARNING,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    import datetime as dt
+    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = Path(args.log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    debug_log_path = log_dir / f"session_{timestamp}.debug.log"
+
+    if args.debug:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            filename=str(debug_log_path),
+            filemode="w",
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+        print(f"Debug log: {debug_log_path}", file=sys.stderr)
+    else:
+        logging.basicConfig(
+            level=logging.WARNING,
+            stream=sys.stderr,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
 
     if args.summary_interval_seconds < 0:
         print("error: --summary-interval-seconds must be >= 0", file=sys.stderr)
@@ -803,7 +931,7 @@ def main() -> None:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(2)
 
-    session_logger = SessionLogger(log_dir=Path(args.log_dir))
+    session_logger = SessionLogger(log_dir=log_dir, timestamp=timestamp)
     print(f"Log: {session_logger.path}", file=sys.stderr)
     _emit_settings(args)
     print("", file=sys.stderr)
@@ -867,6 +995,21 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        # Commit any remaining final segments left in the queue (e.g. emitted during shutdown)
+        if hasattr(backend, "_segment_queue"):
+            try:
+                import time
+                time.sleep(0.1)
+                while not backend._segment_queue.empty():
+                    seg = backend._segment_queue.get_nowait()
+                    if not seg.is_partial:
+                        ts = format_offset(seg.start_offset_seconds)
+                        session_logger.log_segment(ts, seg.source, seg.target)
+                        print(f"[{ts}] {seg.source.strip()}")
+                        print(f"[{ts}] {seg.target.strip()}\n")
+            except Exception:
+                pass
+
         if summary_executor is not None:
             # 進行中の要約タスクは完了まで待つ (まだ表示されてない要約を取りこぼさない).
             summary_executor.shutdown(wait=True)

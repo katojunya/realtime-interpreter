@@ -26,11 +26,11 @@ def format_offset(seconds: float) -> str:
 class SessionLogger:
     """1 セッション分のログをファイルに記録する."""
 
-    def __init__(self, log_dir: Path | str = "logs") -> None:
+    def __init__(self, log_dir: Path | str = "logs", timestamp: str | None = None) -> None:
         self._dir = Path(log_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
-        timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.path = self._dir / f"session_{timestamp}.log"
+        ts = timestamp or dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.path = self._dir / f"session_{ts}.log"
         self._start = time.monotonic()
         self._fh = self.path.open("w", encoding="utf-8", buffering=1)
         self._write_header()

@@ -241,3 +241,73 @@ class OpenAIChatSummarizer:
                 text[:80],
             )
         return SummaryResult(text=text, latency_seconds=latency)
+
+
+class GeminiRESTSummarizer:
+    """Gemini REST-based summary generator."""
+
+    def __init__(
+        self,
+        model: str,
+        api_key: str | None = None,
+        source_lang: str = DEFAULT_SOURCE,
+        target_lang: str = DEFAULT_TARGET,
+    ) -> None:
+        self.model = model
+        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        self.source_lang = source_lang
+        self.target_lang = target_lang
+
+    def summarize(self, source_text: str, duration_seconds: int) -> SummaryResult:
+        if not source_text.strip():
+            return SummaryResult(text="", latency_seconds=0.0)
+        if not self.api_key:
+            logger.warning("Gemini API key is missing. Cannot generate summary.")
+            return SummaryResult(text="", latency_seconds=0.0)
+
+        import urllib.request
+        import urllib.error
+        import json
+
+        prompt_text = build_summary_prompt(
+            source_text, duration_seconds,
+            source_lang=self.source_lang,
+            target_lang=self.target_lang,
+        )
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt_text}]
+            }],
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 256
+            }
+        }
+
+        data = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+        )
+
+        t0 = time.perf_counter()
+        try:
+            with urllib.request.urlopen(request, timeout=30.0) as response:
+                body = response.read().decode("utf-8")
+            res_json = json.loads(body)
+            text = res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8") if e.fp else ""
+            logger.error("Gemini summary HTTP error (model=%s) code=%d: %s, body=%s", self.model, e.code, e.reason, err_body)
+            return SummaryResult(text="", latency_seconds=time.perf_counter() - t0)
+        except Exception:
+            logger.exception("Gemini summary failed (model=%s)", self.model)
+            return SummaryResult(text="", latency_seconds=time.perf_counter() - t0)
+
+        latency = time.perf_counter() - t0
+        logger.info("Gemini summary (%s) %.2fs / %s", self.model, latency, text[:80])
+        return SummaryResult(text=text, latency_seconds=latency)
+
