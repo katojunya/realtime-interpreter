@@ -136,7 +136,17 @@ class GeminiRealtimeBackend:
 
         self._audio_queue: queue.Queue[np.ndarray] = queue.Queue()
         self._segment_queue: queue.Queue[TranslatedSegment] = queue.Queue()
+        # _stop_event: セッションを恒久終了する (ユーザ Ctrl+C or 復旧不能エラー)。
+        # _closing:    ユーザ起因の終了のみ (サーバ切断と区別するため)。
+        # 接続が ~10 分上限で切れた場合は両方未セットのまま再接続を試みる。
         self._stop_event = threading.Event()
+        self._closing = threading.Event()
+
+        # Session Resumption: 切断をまたいでセッションを継続するための handle。
+        # サーバが sessionResumptionUpdate.newHandle で送ってくる。
+        self._resumption_handle: str | None = None
+        self._ws_lock = threading.Lock()        # ws の差し替えを保護
+        self._reconnecting = threading.Event()  # 再接続中は送信を止める
 
         self._pending_lock = threading.Lock()
         self._pending_turn: _PendingTurn | None = None
@@ -176,6 +186,8 @@ class GeminiRealtimeBackend:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
+        # ユーザ起因の終了. _closing を先に立てて「サーバ切断ではない」と区別する。
+        self._closing.set()
         self._stop_event.set()
         try:
             if self._stream is not None:
@@ -222,50 +234,55 @@ class GeminiRealtimeBackend:
         self._ws.connect(url)
         logger.info("connected to Gemini Live API: %s", GEMINI_REALTIME_URL)
 
-    def _send_session_config(self) -> None:
+    def _send_session_config(self, resume: bool = False) -> None:
         is_translation_model = "live-translate" in self._model.lower()
 
         if is_translation_model:
-            msg = {
-                "setup": {
-                    "model": self._model,
-                    "generationConfig": {
-                        "responseModalities": ["AUDIO"],
-                        "translationConfig": {
-                            "targetLanguageCode": self.target_lang,
-                            "echoTargetLanguage": False
-                        }
-                    },
-                    "inputAudioTranscription": {},
-                    "outputAudioTranscription": {}
-                }
+            setup: dict = {
+                "model": self._model,
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "translationConfig": {
+                        "targetLanguageCode": self.target_lang,
+                        "echoTargetLanguage": False
+                    }
+                },
+                "inputAudioTranscription": {},
+                "outputAudioTranscription": {}
             }
         else:
-            msg = {
-                "setup": {
-                    "model": self._model,
-                    "generationConfig": {
-                        "responseModalities": ["AUDIO"],
-                        "temperature": 0.0,
-                    },
-                    "systemInstruction": {
-                        "parts": [
-                            {
-                                "text": (
-                                    f"You are a professional simultaneous interpreter from {language_name(self.source_lang)} to {language_name(self.target_lang)}. "
-                                    f"Translate the incoming audio stream to {language_name(self.target_lang)}. "
-                                    f"Output only the translation, with no extra text or commentary."
-                                )
-                            }
-                        ]
-                    },
-                    "inputAudioTranscription": {},
-                    "outputAudioTranscription": {}
-                }
+            setup = {
+                "model": self._model,
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "temperature": 0.0,
+                },
+                "systemInstruction": {
+                    "parts": [
+                        {
+                            "text": (
+                                f"You are a professional simultaneous interpreter from {language_name(self.source_lang)} to {language_name(self.target_lang)}. "
+                                f"Translate the incoming audio stream to {language_name(self.target_lang)}. "
+                                f"Output only the translation, with no extra text or commentary."
+                            )
+                        }
+                    ]
+                },
+                "inputAudioTranscription": {},
+                "outputAudioTranscription": {}
             }
 
+        # Session Resumption を有効化. 初回は空 ({}) でハンドル発行を要求し、
+        # 再接続時は保存済みハンドルを渡して同一セッションを継続する。
+        if resume and self._resumption_handle:
+            setup["sessionResumption"] = {"handle": self._resumption_handle}
+        else:
+            setup["sessionResumption"] = {}
+
+        msg = {"setup": setup}
         self._ws.send(json.dumps(msg))
-        logger.debug("setup sent: %s", json.dumps(msg))
+        # ハンドルはログに出さない (機密に近いため). resume フラグのみ記録。
+        logger.debug("setup sent (resume=%s)", resume)
 
     def _open_audio_stream(self) -> None:
         self._capture_rate = GEMINI_SAMPLE_RATE
@@ -354,13 +371,20 @@ class GeminiRealtimeBackend:
             except queue.Empty:
                 self._maybe_log_level()
                 continue
+            # 再接続中は送信しない (まだ ws が無効). 古い音声は捨ててバックログを防ぐ。
+            if self._reconnecting.is_set():
+                continue
             self._update_level(chunk)
             try:
                 self._send_audio_chunk(chunk)
             except Exception:
-                logger.exception("audio send failed")
-                self._stop_event.set()
-                return
+                # 切断由来の失敗で send_loop を殺さない。recv_loop が再接続を駆動するので、
+                # ここでは少し待って次チャンクへ進む (再接続完了後に送信再開)。
+                if self._closing.is_set() or self._stop_event.is_set():
+                    return
+                logger.debug("audio send failed (will resume after reconnect)")
+                time.sleep(0.1)
+                continue
             self._maybe_log_level()
 
     def _update_level(self, chunk: np.ndarray) -> None:
@@ -449,8 +473,16 @@ class GeminiRealtimeBackend:
             try:
                 raw = self._ws.recv()
             except Exception:
-                if not self._stop_event.is_set():
-                    logger.exception("ws recv failed")
+                # ユーザ起因の終了なら静かに抜ける。
+                if self._closing.is_set() or self._stop_event.is_set():
+                    return
+                # サーバ切断 (~10分の接続上限等). 進行中ターンを確定してから再接続する。
+                logger.info("Gemini connection lost; attempting session resumption...")
+                self._flush_pending_on_disconnect()
+                if self._reconnect():
+                    continue  # 新しい ws で受信再開
+                # 再接続に失敗 → 恒久終了
+                logger.error("Gemini reconnection failed; stopping.")
                 self._stop_event.set()
                 return
             if not raw:
@@ -460,6 +492,51 @@ class GeminiRealtimeBackend:
             except json.JSONDecodeError:
                 continue
             self._handle_event(event)
+
+    def _flush_pending_on_disconnect(self) -> None:
+        """切断時に進行中ターンを確定して取りこぼしを防ぐ."""
+        with self._pending_lock:
+            if self._pending_turn is not None and self._pending_turn.has_content():
+                self._emit_pending_locked()
+
+    def _reconnect(self, max_attempts: int = 5) -> bool:
+        """保存済み resumption handle で再接続する.
+
+        成功で True. closing/stop が立ったら False を返して諦める。
+        指数バックオフ (0.5, 1, 2, 4, 8 秒上限) でリトライ。
+        """
+        self._reconnecting.set()
+        try:
+            delay = 0.5
+            for attempt in range(1, max_attempts + 1):
+                if self._closing.is_set() or self._stop_event.is_set():
+                    return False
+                try:
+                    with self._ws_lock:
+                        try:
+                            if self._ws is not None:
+                                self._ws.close()
+                        except Exception:
+                            pass
+                        self._open_websocket()
+                        self._send_session_config(resume=True)
+                    logger.info(
+                        "Gemini reconnected (attempt %d, resumed=%s)",
+                        attempt,
+                        self._resumption_handle is not None,
+                    )
+                    return True
+                except Exception:
+                    logger.warning(
+                        "Gemini reconnect attempt %d/%d failed; retrying in %.1fs",
+                        attempt, max_attempts, delay,
+                    )
+                    if self._stop_event.wait(timeout=delay):
+                        return False
+                    delay = min(delay * 2, 8.0)
+            return False
+        finally:
+            self._reconnecting.clear()
 
     def _handle_event(self, event: dict) -> None:
         error = event.get("error")
@@ -478,10 +555,26 @@ class GeminiRealtimeBackend:
 
         session_resumption = event.get("sessionResumptionUpdate")
         if session_resumption:
-            logger.debug("Gemini session resumption update: %s", session_resumption)
+            # 再接続に使う handle を保存. resumable=False のときは更新しない。
+            new_handle = session_resumption.get("newHandle")
+            if new_handle:
+                self._resumption_handle = new_handle
+            logger.debug(
+                "session resumption update (resumable=%s, handle=%s)",
+                session_resumption.get("resumable"),
+                "set" if new_handle else "none",
+            )
+
+        # goAway: サーバが接続をまもなく切ることの予告. 残り時間が含まれる。
+        # 当面は記録のみ (実際の切断を recv エラーで検知して再接続する)。
+        go_away = event.get("goAway")
+        if go_away:
+            logger.info("Gemini goAway received (time left: %s)", go_away.get("timeLeft"))
 
         server_content = event.get("serverContent")
-        is_known_event = bool(usage_metadata or session_resumption or "setupComplete" in event)
+        is_known_event = bool(
+            usage_metadata or session_resumption or go_away or "setupComplete" in event
+        )
 
         if not server_content:
             if not is_known_event:
