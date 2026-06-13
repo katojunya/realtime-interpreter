@@ -1,4 +1,6 @@
-# realtime-interpreter
+# realtime-interpreter (Windows, macOS 対応 コンソール翻訳アプリ)
+
+![realtime-interpreter の実行例 (英語音声 → 日本語の文字起こし・訳・要約)](example.png)
 
 音声をマルチモーダル LLM に直接入力して、入力言語の文字起こしと翻訳テキストを生成し、リアルタイムにストリーム表示するコンソールアプリケーション。既定は **英語 → 日本語**。音声からテキストへ文字起こしを行う **Whisper を経由せず**、音声をマルチモーダル LLM に直接渡し、**文字起こしと訳文を同時に生成**します。一定間隔(デフォルトでは1分)ごとに翻訳先の言語で要約を表示します。
 
@@ -84,7 +86,7 @@ $env:OPENAI_API_KEY = "sk-..."
 uv run realtime-interpreter           # --backend openai-realtime の指定と同じ
 ```
 
-#### 起動方法h [**Gemini 3.5 Live Translate**]
+#### 起動方法 [**Gemini 3.5 Live Translate**]
 
 ```bash
 # APIキーの設定
@@ -100,7 +102,7 @@ uv run realtime-interpreter --backend gemini-realtime # バックエンドを明
 
 #### 起動方法 [**OpenAI 互換 Chat Completions API**] (ローカル LLM / Ollama)
 
-ローカル LLM で動かす場合は、Ollama / LM Studio などの OpenAI 互換サーバを起動し、`gemma4:e4b` をロードしておきます。既定の base URL は `http://localhost:11434/v1`、モデル名は `gemma4:e4b` です。
+ローカル LLM で動かす場合は、Ollama / LM Studio などの OpenAI 互換サーバを起動し、`gemma4:e4b` をロードしておきます。デフォルトのベース URI は `http://localhost:11434/v1`、モデル名は `gemma4:e4b` です。
 
 ```bash
 ollama serve            # 別ターミナルで起動しておく
