@@ -1,8 +1,10 @@
 # realtime-interpreter (Windows, macOS 対応 コンソール翻訳アプリ)
 
-![realtime-interpreter の実行例 (英語音声 → 日本語の文字起こし・訳・要約)](example.png)
-
 音声をマルチモーダル LLM に直接入力して、入力言語の文字起こしと翻訳テキストを生成し、リアルタイムにストリーム表示するコンソールアプリケーション。既定は **英語 → 日本語**。音声からテキストへ文字起こしを行う **Whisper を経由せず**、音声をマルチモーダル LLM に直接渡し、**文字起こしと訳文を同時に生成**します。一定間隔(デフォルトでは1分)ごとに翻訳先の言語で要約を表示します。
+
+画面の様子は OpenAI が GPT-Realtime-Translate のモデルを発表したときの [YouTube 動画](https://www.youtube.com/watch?v=JOu8v6CBjkE)の音声をリアルタイムに翻訳している様子です。
+
+![realtime-interpreter の実行例 (英語音声 → 日本語の文字起こし・訳・要約)](example.png)
 
 ## サポートしているバックエンド
 
