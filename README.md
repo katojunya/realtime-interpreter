@@ -104,7 +104,7 @@ uv run realtime-interpreter --backend gemini-realtime # バックエンドを明
 
 ```bash
 ollama serve            # 別ターミナルで起動しておく
-ollama pull gemma4:e4b  # ※ Windows では e2b 推奨 (後述の注意点参照)
+ollama pull gemma4:e4b
 uv run realtime-interpreter --backend openai-chat   # バックエンドは明示的に指定すること
 ```
 
@@ -162,7 +162,7 @@ BlackHole 2ch (macOS) / WASAPI loopback (Windows)
 BlackHole 2ch
   → SpeechSegmentCapture (Silero VAD で発話を区切る. 無音 800ms or 最大 8s で finalize)
   → GemmaAudioTranslator (mlx-vlm + google/gemma-4-e4b-it 4bit)
-       1 回の推論で "EN: ... / JA: ..." を生成
+       1 回の推論で "SRC: ... / TGT: ..." を生成
   → 確定したセグメント単位で append-only 出力
   → [60秒ごと] 同じ Gemma 4 をテキスト専用で再利用して要約
 ```
@@ -352,7 +352,7 @@ uv run realtime-interpreter --backend mlx --list-models # プリセット一覧
 - **openai-realtime**: OpenAI Chat Completions (`gpt-5-mini`)。ライブ翻訳と同じ `OPENAI_API_KEY` で動作
 - **gemini-realtime**: `gemini-3.1-flash-lite`, APIキーもライブ翻訳と同じ
 - **openai-chat**: 同じ OpenAI 互換 REST API
-- **mlx**: ライブ翻訳と同じ Gemma4 をテキスト専用モードで再利用
+- **mlx**: ライブ翻訳と同じ Gemma 4 をテキスト専用モードで再利用
 
 ```bash
 uv run realtime-interpreter --summary-interval-seconds 0    # 要約を無効化
