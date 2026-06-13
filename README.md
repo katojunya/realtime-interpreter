@@ -1,38 +1,48 @@
 # realtime-interpreter
 
-音声をマルチモーダル LLM に直接入力して、**source 言語の文字起こし + target 言語の訳** をリアルタイムにストリーム表示する CLI。既定は **英語 → 日本語** で、`--source-lang` / `--target-lang` (短縮形 `--from` / `--to`, `-s` / `-t`) で任意の言語ペアに切り替え可能。
+音声をマルチモーダル LLM に直接入力して、入力言語の文字起こしと翻訳テキストを生成し、リアルタイムにストリーム表示するコンソールアプリケーション。既定は **英語 → 日本語**。音声からテキストへ文字起こしを行う **Whisper を経由せず**、音声をマルチモーダル LLM に直接渡し、**文字起こしと訳文を同時に生成**します。一定間隔(デフォルトでは1分)ごとに翻訳先の言語で要約を表示します。
 
-**バックエンド切替対応**:
+## サポートしているバックエンド
 
 | バックエンド | 実装 | 特徴 |
 |---|---|---|
-| `openai-realtime` (既定) | OpenAI gpt-realtime-translate (WebSocket) | クラウド・$0.034/分・低レイテンシ・サーバ VAD |
-| `openai-chat` | OpenAI 互換 Chat Completions REST | ローカル VAD で区切った WAV を直接マルチモーダル LLM に入力。ローカル動作のOllamaの利用が標準設定 |
-| `mlx` (macOSのみ) | mlx-vlm + Gemma 4 (ローカル) | オフライン・無料・Apple Silicon ネイティブ |
+| `openai-realtime` (既定) | OpenAI gpt-realtime-translate (WebSocket) | クラウド・低レイテンシ・サーバ VAD・約 $3/時。|
+| `gemini-realtime` | Gemini Multimodal Live API (WebSocket) | クラウド・低レイテンシ・サーバ VAD・約 $2.25/時。 |
+| `openai-chat` | OpenAI 互換 Chat Completions REST | ローカル VAD で区切った WAV を直接入力。標準は**ローカル Ollama**。エンドポイント変更で OpenAI Webサービスの利用も可 |
+| `mlx` (macOS のみ) | mlx-vlm + Gemma 4 (ローカル) | オフライン・Apple Silicon 専用 macOS ネイティブ |
 
-本ツールは **Whisper を経由せず** Gemma 4 (mlx-vlm) に音声を直接入力し、1 回の推論で **英文の文字起こしと日本語訳を同時生成** します。OpenAI Realtime バックエンドではサーバ側で同等の処理が走ります。`openai-chat` バックエンドのデフォルトは、ローカルの Ollama 等の OpenAI 互換の REST API に WAV 音声を直接渡す設定です。エンドポイント変更することでOpenAIのサービスを使うことも可能です。
+既定バックエンドは**両OSで `openai-realtime`**。利用可能なバックエンドは OS により異なります:
+
+- **macOS**: `openai-realtime` / `gemini-realtime` / `openai-chat` / `mlx`
+- **Windows**: `openai-realtime` / `gemini-realtime` / `openai-chat`
 
 ## クイックスタート
 
-まず 1 回動かすための最短手順です。詳細 (言語切替・モデル選択・チューニング等) は後続の各節を参照してください。
+動かすための最短手順です。詳細 (バックエンド切替・言語切替・モデル選択・チューニング等) は後続の各節を参照してください。
 
 ### 1. uv をインストール
 
-Python 本体は uv が自動で用意するため、別途インストールは不要です。管理者権限も不要です。
+Python 本体は `uv` が自動で用意するため、別途インストールは不要です。管理者権限も不要です。
+`uv` のインストール後は**新しいシェルを開いて** PATH を反映させてください (`uv --version` で確認)。
+
+#### macOS
 
 ```bash
-# macOS / Linux
 curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# brew を使っているなら
+brew install uv
 ```
+
+#### Windows
 
 ```powershell
 # Windows (PowerShell)
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-インストール後は**新しいシェルを開いて** PATH を反映させてください (`uv --version` で確認)。
 
-### 2. 依存をインストール
+### 2. 依存モジュールをインストール
 
 リポジトリのルートで:
 
@@ -40,56 +50,113 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 uv sync
 ```
 
-プラットフォームに応じて必要な依存だけが入ります (macOS は mlx 系も込み、Windows/Linux はスキップ)。
+プラットフォームに応じて必要な依存モジュールがインストールされます。
 
-### 3. まず 1 回動かす
+### 3. 起動する
 
-お使いの環境に応じて、いちばん手軽な方法でどうぞ。
+#### 起動方法
 
-**macOS — まず音声ファイルで翻訳を確認** (オーディオ設定不要・無料・ローカル):
+お使いの環境・用途に応じて、各バックエンドでの動かし方を示します。音声入力デバイスの準備は OS ごとに異なります (下記参照)。
+
+Windows:
+
+ブラウザや Zoom 等で音声を再生するとデフォルトの音声出力先のデバイスがタップされて、その音が入力として取り込まれ翻訳を開始します。音声デバイスの設定は不要です。
+
+macOS:
+
+BlackHole 2ch などを用いて音声出力を、入力デバイスへルーティングして下さい。ユーザによる設定が必要です。brew を使っているなら、下記のコマンドでインストール可能です。
 
 ```bash
-uv run python scripts/smoke_test.py samples/test_en_librispeech.flac
+brew install --cask blackhole-2ch
 ```
 
-英文と日本語訳が表示されれば成功です。初回は Gemma 4 モデル (約 5GB) のダウンロードが走ります。ライブ翻訳 (`uv run realtime-interpreter`) には BlackHole の設定が必要です → [前提条件](#前提条件)。
+#### 起動方法 [**OpenAI Realtime Translate (デフォルト)**]
 
-**Windows — クラウドで即実行** (追加のオーディオ設定不要):
+```bash
+# APIキーの設定
+## macOS
+export OPENAI_API_KEY="sk-..."
 
-```powershell
+## Windows PowerShell
 $env:OPENAI_API_KEY = "sk-..."
-uv run realtime-interpreter --backend openai-realtime
+
+
+uv run realtime-interpreter           # --backend openai-realtime の指定と同じ
 ```
 
-ブラウザや Zoom 等で英語音声を再生すると、その音が WASAPI ループバックで取り込まれ翻訳が流れます。スピーカーからは普段どおり音が聞こえたままです。
+#### 起動方法h [**Gemini 3.5 Live Translate**]
 
-**完全オフライン / ローカル LLM** (Ollama 等の OpenAI 互換サーバ・APIキー不要):
+```bash
+# APIキーの設定
+## macOS
+export GEMINI_API_KEY="..."
+
+## Windows PowerShell
+$env:GEMINI_API_KEY = "..."
+
+
+uv run realtime-interpreter --backend gemini-realtime # バックエンドを明示的に指定すること
+```
+
+#### 起動方法 [**OpenAI 互換 Chat Completions API**] (ローカル LLM / Ollama)
+
+ローカル LLM で動かす場合は、Ollama / LM Studio などの OpenAI 互換サーバを起動し、`gemma4:e4b` をロードしておきます。既定の base URL は `http://localhost:11434/v1`、モデル名は `gemma4:e4b` です。
 
 ```bash
 ollama serve            # 別ターミナルで起動しておく
-ollama pull gemma4:e4b
-uv run realtime-interpreter --backend openai-chat
+ollama pull gemma4:e4b  # ※ Windows では e2b 推奨 (後述の注意点参照)
+uv run realtime-interpreter --backend openai-chat   # バックエンドは明示的に指定すること
 ```
-
-> うまく動いたら、以降の節で **言語の切り替え**・**バックエンドの選択**・**チャンクサイズの調整**などを確認してください。
-
-## 出力フォーマット
-
-VAD で検出された発話セグメント単位で、確定した結果を 2 行で append-only に出力します。一度出力した行は書き換えません。
-
-```
-[00:21] We're driven by the idea that the products we create should help unleash creativity.
-[00:21] 私たちは、私たちが作る製品が創造性を解き放つ手助けをするべきだという考えに突き動かされています。
-
-[00:27] We build some of the largest internet services on the planet and many of them run on AWS.
-[00:27] 私たちは世界最大級のインターネットサービスを構築しており、その多くは AWS 上で稼働しています。
-```
-
-英文の文字起こしはグレー、日本語訳は通常色で表示されます。同じ `[mm:ss]` がペアで付くのは、両者が同じセグメントを指すためです (時刻はセグメント開始時)。
 
 ## アーキテクチャ
 
-### MLX バックエンド (既定, ローカル)
+### openai-realtime バックエンド (既定, クラウド)
+
+```
+BlackHole 2ch (macOS) / WASAPI loopback (Windows)
+  → 24kHz PCM16 で WebSocket ストリーム送信
+  → OpenAI gpt-realtime-translate
+       サーバ側で VAD + 文字起こし + 翻訳 を一括実行
+  → input_transcript.delta (source) / output_transcript.delta (target) を delta 単位で受信
+  → 受信ごとに Rich Live が in-place で「進行中」行を更新表示
+  → delta が一定時間 (既定 800ms) 来なくなったら debounce で発話確定 (or 最大 8s で強制カット)
+  → 確定行を append-only に永続表示 + ログ
+  → [60秒ごと] OpenAI Chat Completions (既定 gpt-5-mini) で過去 60 秒を要約
+```
+
+**確定ロジック (alignment-first)**: この API には `*.completed` イベントが無いため、**delta が一定時間 (既定 800ms) 来なくなった時点で発話を確定**します。連続発話では `--openai-rt-max-segment-seconds` (既定 8s) で強制カットします。文単位 (JA `。` / EN `.`) の即時 commit も試したが、本モデルは EN 1 文を JA 複数文に訳すことがあり対応がズレるため、debounce ベースに統一しています。
+
+**自動再接続 (60分制限対策)**: OpenAI Realtime API は 1 接続あたり最大 60 分でサーバから切断されます。本実装は **接続から 55 分でプロアクティブに新接続へ張り替え** (切れ目をほぼゼロに)、加えて切断・瞬断を検知すると**指数バックオフで再接続**します。再接続は新規セッションですが (Realtime に再開ハンドルは無い)、要約履歴はアプリ側で保持するため継続します。再接続の瞬間 (1〜2 秒) に 1 フレーズ程度欠落することがあります。
+
+### gemini-realtime バックエンド (クラウド)
+
+```
+BlackHole 2ch (macOS) / WASAPI loopback (Windows)
+  → 16kHz PCM16 で WebSocket ストリーム送信
+  → Gemini Multimodal Live API (models/gemini-3.5-live-translate-preview)
+       inputAudioTranscription (source) / 翻訳 (target) を delta 単位で受信
+  → debounce (既定 800ms) / 最大 8s で発話確定して append-only 出力
+  → [60秒ごと] gemini-3.1-flash-lite で要約
+```
+
+**長時間運用**: Gemini Live は接続 (~10分) / セッション (~15分) に上限がありますが、本実装は **session resumption** (切断をまたいで再接続) と **context window compression** (sliding window でトークン上限を回避) の両方を有効化しており、**数時間の連続セッション**が可能です (実機で 1 時間超の連続翻訳を確認済み)。
+
+**過剰分割対策**: live-translate は短い翻訳単位ごとに `turnComplete` を頻発させます。これを確定トリガにすると 1〜数語の細切れが多発するため、本実装では `turnComplete` を確定に使わず debounce / max_segment のみで束ねています。それでも細切れが気になる場合は `--gemini-rt-debounce-ms` を上げてください (例 1500)。
+
+### openai-chat バックエンド (OpenAI 互換 Chat Completions REST)
+
+```
+BlackHole 2ch (macOS) / WASAPI loopback (Windows)
+  → SpeechSegmentCapture (Silero VAD で発話を区切る. 無音 800ms or 最大 8s で finalize)
+  → WAV PCM16 にエンコード
+  → OpenAI 互換 /v1/chat/completions
+       input_audio として WAV を渡し、1 回の推論で "SRC: ... / TGT: ..." を生成
+  → 確定したセグメント単位で append-only 出力
+```
+
+既定では Ollama を想定し、`--openai-chat-base-url http://localhost:11434/v1` と `--openai-chat-model gemma4:e4b` を使います。REST 方式のため delta 単位の in-place 表示はなく、発話セグメント確定後に表示されます。
+
+### mlx バックエンド (macOS のみ, ローカル)
 
 ```
 BlackHole 2ch
@@ -97,93 +164,39 @@ BlackHole 2ch
   → GemmaAudioTranslator (mlx-vlm + google/gemma-4-e4b-it 4bit)
        1 回の推論で "EN: ... / JA: ..." を生成
   → 確定したセグメント単位で append-only 出力
-  → SessionLogger に同形式でログ記録
-
-  [60秒ごと]
-  → Summarizer (Gemma 4 をテキスト専用で再利用)
-       過去 60 秒の英文の文字起こしから日本語要約を生成
-  → 要約ブロックを表示 + ログ記録
+  → [60秒ごと] 同じ Gemma 4 をテキスト専用で再利用して要約
 ```
 
-### OpenAI バックエンド (クラウド)
+## 長時間連続動作に対するセーフティ機構
 
-```
-BlackHole 2ch
-  → 24kHz PCM16 で WebSocket ストリーム送信
-  → OpenAI gpt-realtime-translate
-       サーバ側で VAD + 転写 + 翻訳 + (TTS) を一括実行
-  → input_transcript.delta (英語) / output_transcript.delta (日本語) を delta 単位で受信
-  → 受信ごとに Rich Live が in-place で「進行中」行を更新表示
-  → 1.5 秒 delta が来なくなったら debounce でターン確定
-  → 確定行を append-only に永続表示 + ログ
-```
-
-**ストリーミング表示 + 発話単位の commit (alignment-first)**: delta が届くたびに英語 + 日本語の 2 行が in-place で伸びていきます (Rich Live)。**delta が一定時間 (既定 800ms) 来なくなった時点でその発話を確定** として上に積み上げ、次の発話を新しい in-progress 行として表示します。
-
-文単位 (JA `。` / EN `.`) でリアルタイム commit する設計も試したが、本モデルは **EN 1 文を JA 複数文 (例: 挨拶を独立文として切る) で訳す** ことがあり、文単位 commit を行うと EN1 ↔ JA1 だけがペアになって後続がズレるため、現状は debounce ベースに統一している。
-
-`--openai-debounce-ms` で発話の切れ目検出感度を調整できます (既定 800):
-
-| 値 | トレードオフ |
-|---|---|
-| 200〜500 | レスポンス重視. ただし翻訳途中で commit して EN/JA がズレる可能性あり |
-| 800 (既定) | バランス. 通常の発話間ポーズで commit |
-| 1500〜2500 | より長い文・段落単位で commit. 確実に対応が取れるが表示は遅延する |
-
-`--openai-max-segment-seconds` で **連続発話時の強制 commit 上限** を設定できます (既定 8.0). ポーズなしの長台詞でも N 秒で 1 チャンクに切り分けます:
-
-| 値 | 効果 |
-|---|---|
-| `8` (既定) | 連続発話でも約 8 秒で強制カット. 読みやすさ重視 |
-| `15` | 中庸 |
-| `30` | 段落単位の長文を許容 |
-| `0` | 強制カット無効. debounce のみで判定 (連続発話で巨大化する可能性) |
-
-強制 commit 時は EN/JA に若干ズレが生じる可能性がありますが、文単位の即時 commit と比べると軽症です。
-
-**要約機能** は OpenAI Chat Completions API (既定 `gpt-5-mini`) を使って実装されています。Realtime API とは別経路ですが、**同じ `OPENAI_API_KEY` で動作** するため追加設定不要。コストは要約 1 回あたり概ね $0.0003〜$0.0005、60 秒に 1 回の頻度なら **$0.02〜$0.05/時** ほどで、翻訳コスト ($3/h) に対して誤差レベル。`--openai-summary-model` で gpt-4o-mini など他モデルへ切り替え可能 (`gpt-4o-mini` ならさらに半額)。
-
-### OpenAI Chat バックエンド (OpenAI 互換 REST)
-
-```
-macOS: BlackHole 2ch / Windows: WASAPI loopback
-  → SpeechSegmentCapture (Silero VAD で発話を区切る. 無音 800ms or 最大 8s で finalize)
-  → WAV PCM16 にエンコード
-  → OpenAI-compatible /v1/chat/completions
-       input_audio として WAV を渡し、1 回の推論で "SRC: ... / TGT: ..." を生成
-  → 確定したセグメント単位で append-only 出力
-  → SessionLogger に同形式でログ記録
-```
-
-既定では Ollama を想定し、`--openai-chat-base-url http://localhost:11434/v1` と `--openai-chat-model gemma4:e4b` を使います。Ollama 0.24.0 + `gemma4:e4b` / `gemma4:e2b` では WAV 音声の直接入力を確認済みです。REST 方式のため OpenAI Realtime のような delta 単位の in-place 表示はなく、MLX と同じく発話セグメント確定後に表示されます。
+全バックエンド共通で `--max-session-seconds` (既定 86400 = 24 時間) を超えると自動停止します。従量課金の暴走を防ぐセーフティです。
+ユーザーが明示的に制限を解除するなら `--max-session-seconds 0` 指定して下さい。
 
 ## 必要なディスク容量
 
-- Gemma 4 E4B 4-bit MLX: 約 5 GB (初回起動時に `~/.cache/huggingface/hub/` へ自動ダウンロード)
+- Gemma 4 E4B 4-bit MLX: 約 5 GB (mlx 初回起動時に `~/.cache/huggingface/hub/` へ自動ダウンロード)
 - Python 依存関係: 数百 MB
 
 ## 前提条件
 
-### macOS (mlx / openai / openai-chat)
+### macOS
 
 - macOS (Apple Silicon)
-- Python 3.11〜3.13
-- [uv](https://docs.astral.sh/uv/)
-- [BlackHole 2ch](https://existential.audio/blackhole/) と Multi-Output Device 設定 (姉妹プロジェクト README 参照)
-- `openai-chat` でローカル推論する場合は [Ollama](https://ollama.com/) 等の OpenAI 互換サーバ
+- Python 3.11〜3.13 / [uv](https://docs.astral.sh/uv/)
+- [BlackHole 2ch](https://existential.audio/blackhole/) と Multi-Output Device 設定
+- バックエンド別:
+  - `openai-realtime`: `OPENAI_API_KEY`
+  - `gemini-realtime`: `GEMINI_API_KEY`
+  - `openai-chat`: [Ollama](https://ollama.com/) 等の OpenAI 互換サーバ
+  - `mlx`: 追加不要 (初回に Gemma 4 を自動 DL)
 
-### Windows (openai / openai-chat)
+### Windows
 
-- Windows 10/11
-- Python 3.11〜3.13
-- [uv](https://docs.astral.sh/uv/)
-- `openai` 使用時: OpenAI API キー
-- `openai-chat` 使用時: Ollama 等の OpenAI 互換サーバ (Ollama ならAPIキー不要)
-- **追加ソフト不要** — システム音声は WASAPI ループバックで取り込みます (管理者権限・仮想オーディオドライバ不要). `uv sync` で [PyAudioWPatch](https://github.com/s0d3s/PyAudioWPatch) (loopback 対応の PyAudio フォーク) が自動インストールされます
-- `openai-chat` は `uv sync` でインストールされる `silero-vad-lite` を使ってローカルで発話区切りを検出します
-- VDI (リモートデスクトップ等の「リモート オーディオ」) でも動作確認済み
-
-> mlx バックエンド (ローカル Gemma 4 via mlx-vlm) は Apple Silicon 専用のため Windows では使えません。Windows では `--backend openai` または `--backend openai-chat` を使ってください。
+- Windows 10/11 / Python 3.11〜3.13 / [uv](https://docs.astral.sh/uv/)
+- バックエンド別: `openai-realtime` は `OPENAI_API_KEY`、`gemini-realtime` は `GEMINI_API_KEY`、`openai-chat` は Ollama 等 (API キー不要)
+- **追加ソフト不要** — システム音声は WASAPI ループバックで取り込みます (管理者権限・仮想オーディオドライバ不要)。`uv sync` で [PyAudioWPatch](https://github.com/s0d3s/PyAudioWPatch) が自動インストールされます
+- VDI (リモートデスクトップの「リモート オーディオ」) でも動作確認済み
+- mlx バックエンドは Apple Silicon 専用のため Windows では使えません
 
 ## セットアップ
 
@@ -192,66 +205,43 @@ uv sync
 ```
 
 `uv sync` はプラットフォームを自動判定します:
-- **macOS**: mlx-vlm / silero-vad-lite 等を含む全依存をインストール (mlx / openai / openai-chat 利用可)
-- **Windows**: mlx 系はスキップされ、openai / openai-chat に必要な PyAudioWPatch と silero-vad-lite をインストール
-- **Linux**: mlx 系はスキップされ、openai-realtime バックエンドに必要な依存のみインストール
-
-(mlx バックエンド初回実行時に Gemma 4 のモデルファイル (約 5GB) が HuggingFace から自動ダウンロードされます。)
-
-### Windows での実行
-
-OpenAI Realtime を使う場合:
-
-```powershell
-# PowerShell
-$env:OPENAI_API_KEY = "sk-..."
-uv run realtime-interpreter --backend openai-realtime
-```
-
-```cmd
-:: コマンドプロンプト
-set OPENAI_API_KEY=sk-...
-uv run realtime-interpreter --backend openai-realtime
-```
-
-Ollama 等の OpenAI 互換 REST API を使う場合:
-
-```powershell
-ollama serve
-ollama pull gemma4:e4b
-uv run realtime-interpreter --backend openai-chat
-```
-
-どちらのバックエンドも、Windowsでは **既定のスピーカー (出力デバイス) の音を WASAPI ループバックで取り込み**、翻訳します。何かアプリ (YouTube, Zoom, Teams 等) で英語音声を再生すると、その音が翻訳されます。スピーカーからは普段どおり音が聞こえたままです。
-
-別の出力デバイスを取り込みたい場合は `--device "<出力デバイス名>"` で指定します。`--list-devices` で取り込み可能な出力デバイス一覧を確認できます。
+- **macOS**: mlx-vlm / silero-vad-lite 等を含む全依存をインストール
+- **Windows**: mlx 系はスキップ、PyAudioWPatch と silero-vad-lite をインストール
 
 ## 使い方
 
-### MLX バックエンド (既定)
-
-```bash
-uv run realtime-interpreter
-# = uv run realtime-interpreter --backend mlx
-```
-
-### OpenAI バックエンド
+### openai-realtime (既定)
 
 ```bash
 export OPENAI_API_KEY=sk-...
-uv run realtime-interpreter --backend openai-realtime
+uv run realtime-interpreter
+# = uv run realtime-interpreter --backend openai-realtime
 ```
 
-OpenAI バックエンドは **WebSocket ベースのストリーミング** で、サーバ側 VAD によって自動的に発話の切れ目が検出されます。要約も同じ API キーで OpenAI Chat Completions 経由 (既定 `gpt-5-mini`) で生成されます。
+Windows (PowerShell / cmd):
 
-出力デバイスが Multi-Output Device になっていない場合、起動時に切替を促します。
-終了は `Ctrl+C`。
+```powershell
+$env:OPENAI_API_KEY = "sk-..."
+uv run realtime-interpreter
+```
 
-### OpenAI Chat バックエンド (Ollama 等)
+```cmd
+set OPENAI_API_KEY=sk-...
+uv run realtime-interpreter
+```
+
+### gemini-realtime
+
+```bash
+export GEMINI_API_KEY=...
+uv run realtime-interpreter --backend gemini-realtime
+```
+
+### openai-chat (Ollama 等)
 
 ```bash
 ollama serve
-ollama pull gemma4:e4b
+ollama pull gemma4:e4b          # Windows は gemma4:e2b
 uv run realtime-interpreter --backend openai-chat
 ```
 
@@ -264,97 +254,86 @@ uv run realtime-interpreter \
   --openai-chat-model gemma4:e2b
 ```
 
+### mlx (macOS のみ)
+
+```bash
+uv run realtime-interpreter --backend mlx
+```
+
+終了は `Ctrl+C`。Windows では既定スピーカーの音を WASAPI ループバックで取り込みます。別の出力デバイスを取り込むには `--device "<出力デバイス名>"`、一覧は `--list-devices`。
+
 ### オプション
 
 | フラグ | 説明 | 既定 | 対象 |
 |---|---|---|---|
-| `--backend` | `mlx` / `openai` / `openai-chat` | macOS: `mlx`, Windows: `openai` | 共通 |
-| `--device` | 入力デバイス名 (部分一致) | `BlackHole 2ch` | 共通 |
+| `--backend` | `openai-realtime` / `gemini-realtime` / `openai-chat` / `mlx` | `openai-realtime` | 共通 |
+| `--device` | 入力/取り込みデバイス名 (部分一致) | `BlackHole 2ch` (macOS) | 共通 |
 | `--list-devices` | オーディオデバイス一覧を表示して終了 | — | 共通 |
-| `--device-check` | 起動時に出力デバイスのルーティングを確認し、必要なら Multi-Output Device への切替を促す (macOS)。既定ではスキップ | (off) | 共通 |
+| `--device-check` | 起動時に出力デバイスのルーティングを確認 (macOS)。既定はスキップ | (off) | 共通 |
 | `--source-lang` / `--from` / `-s` | 音声の言語 (ISO 639-1) | `en` | 共通 |
 | `--target-lang` / `--to` / `-t` | 翻訳先の言語 (ISO 639-1) | `ja` | 共通 |
 | `--list-languages` | 既知の言語コードを表示して終了 | — | 共通 |
-| `--summary-interval-seconds` | N 秒ごとに過去 N 秒分の source 言語テキストを target 言語で要約. `0` で無効. MLX は Gemma 4 を再利用、OpenAI は Chat Completions (`--openai-summary-model`)、openai-chat は同じ OpenAI 互換 API を使用 | `60` | 共通 |
+| `--summary-interval-seconds` | N 秒ごとに過去 N 秒を要約. `0` で無効 | `60` | 共通 |
+| `--max-session-seconds` | この秒数で自動停止 (コスト安全弁). `0` で無制限 | `86400` (24h) | 共通 |
 | `--log-dir` | セッションログの出力先 | `logs/` | 共通 |
 | `--debug` | 詳細ログを stderr に出す | (off) | 共通 |
-| `--model` | モデルエイリアス or 完全な HuggingFace ID | `e4b` | mlx |
-| `--list-models` | プリセット一覧を表示して終了 | — | mlx |
-| `--end-silence-ms` | この長さの無音で発話セグメントを区切る | `800` | mlx / openai-chat |
-| `--max-segment-seconds` | 連続発話時のセグメント最大長 (秒) | `8.0` | mlx / openai-chat |
-| `--openai-model` | Realtime モデル ID | `gpt-realtime-translate` | openai-realtime |
+| `--openai-rt-model` | Realtime モデル ID | `gpt-realtime-translate` | openai-realtime |
+| `--openai-rt-debounce-ms` | 発話の切れ目検出 (debounce) | `800` | openai-realtime |
+| `--openai-rt-max-segment-seconds` | 連続発話の強制カット上限. `0` で無効 | `8.0` | openai-realtime |
+| `--openai-rt-summary-model` | 要約モデル (Chat Completions) | `gpt-5-mini` | openai-realtime |
+| `--openai-rt-api-key` | API キー (既定 `OPENAI_API_KEY`) | — | openai-realtime |
+| `--gemini-rt-model` | Gemini Live モデル ID | `models/gemini-3.5-live-translate-preview` | gemini-realtime |
+| `--gemini-rt-debounce-ms` | 発話の切れ目検出 (debounce) | `800` | gemini-realtime |
+| `--gemini-rt-max-segment-seconds` | 連続発話の強制カット上限. `0` で無効 | `8.0` | gemini-realtime |
+| `--gemini-rt-summary-model` | 要約モデル | `gemini-3.1-flash-lite` | gemini-realtime |
+| `--gemini-rt-api-key` | API キー (既定 `GEMINI_API_KEY`) | — | gemini-realtime |
 | `--openai-chat-base-url` | OpenAI 互換 API の base URL | `http://localhost:11434/v1` | openai-chat |
 | `--openai-chat-model` | Chat Completions モデル ID | `gemma4:e4b` | openai-chat |
-| `--openai-chat-api-key` | Bearer token. 未指定時は `OPENAI_CHAT_API_KEY` → `OPENAI_API_KEY` → `ollama` | — | openai-chat |
-| `--openai-chat-timeout-seconds` | 1 セグメントあたりの REST API タイムアウト | `120` | openai-chat |
-| `--openai-chat-max-tokens` | 1 セグメントあたりの出力上限 | `384` | openai-chat |
+| `--openai-chat-api-key` | Bearer token (既定 `OPENAI_CHAT_API_KEY`→`OPENAI_API_KEY`→`ollama`) | — | openai-chat |
+| `--openai-chat-timeout-seconds` | 1 セグメントの REST タイムアウト | `120` | openai-chat |
+| `--openai-chat-max-tokens` | 1 セグメントの出力上限 | `384` | openai-chat |
 | `--openai-chat-temperature` | サンプリング温度 | `0` | openai-chat |
+| `--end-silence-ms` | 無音で発話を区切る長さ | `800` | mlx / openai-chat |
+| `--max-segment-seconds` | 連続発話のセグメント最大長 (秒) | `8.0` | mlx / openai-chat |
+| `--model` | モデルエイリアス or HuggingFace ID | `e4b` | mlx |
+| `--list-models` | プリセット一覧を表示して終了 | — | mlx |
+
+長いフラグには短縮形があります (`--openai-realtime-model` = `--openai-rt-model`、`--gemini-realtime-model` = `--gemini-rt-model` など)。
 
 環境変数:
-- `REALTIME_INTERPRETER_MODEL`: MLX デフォルトモデルの上書き (エイリアスでも完全 ID でも可)
-- `OPENAI_API_KEY`: `openai` バックエンド使用時に必須. `openai-chat` では互換サーバが認証を要求する場合のみ使用
-- `OPENAI_CHAT_API_KEY`: `openai-chat` バックエンドの Bearer token. Ollama では未指定で可
+- `OPENAI_API_KEY`: `openai-realtime` 必須。`openai-chat` では互換サーバが認証を要求する場合のみ
+- `GEMINI_API_KEY`: `gemini-realtime` 必須
+- `OPENAI_CHAT_API_KEY`: `openai-chat` の Bearer token (Ollama では不要)
+- `REALTIME_INTERPRETER_MODEL`: mlx デフォルトモデルの上書き
 
 ### 言語の切り替え
 
-ISO 639-1 (2 文字コード) で source / target を指定します. 各バックエンドで共通。
+ISO 639-1 (2 文字コード) で source / target を指定します。各バックエンド共通。
 
 ```bash
-# 既定: 英語 → 日本語
-uv run realtime-interpreter
-
-# 短縮形 (mlx / openai / openai-chat いずれでも)
-uv run realtime-interpreter -s en -t es     # 英語 → スペイン語
-uv run realtime-interpreter --from zh --to en  # 中国語 → 英語
-uv run realtime-interpreter --source-lang ja --target-lang en  # 日本語 → 英語
-
-# 既知の言語コード一覧
-uv run realtime-interpreter --list-languages
+uv run realtime-interpreter -s en -t es           # 英語 → スペイン語
+uv run realtime-interpreter --from zh --to en     # 中国語 → 英語
+uv run realtime-interpreter --list-languages      # 既知の言語コード一覧
 ```
-
-主要な言語コード:
-
-| コード | 言語 | コード | 言語 | コード | 言語 |
-|---|---|---|---|---|---|
-| `en` | English | `ja` | Japanese | `es` | Spanish |
-| `fr` | French | `de` | German | `it` | Italian |
-| `pt` | Portuguese | `zh` | Chinese | `ko` | Korean |
-| `ru` | Russian | `ar` | Arabic | `nl` | Dutch |
-| ... | (他は `--list-languages` で確認) | | | | |
 
 #### バックエンド別の挙動
 
 | バックエンド | source | target |
 |---|---|---|
-| **mlx** | プロンプトに言語名を埋め込んで Gemma 4 に渡す. 多言語対応だが品質は言語ペアに依存 | 同上 |
-| **openai** | `gpt-realtime-whisper` が **自動検出** (source 指定はメタ情報として保持するのみ) | `audio.output.language` に target コードを設定 |
-| **openai-chat** | プロンプトに言語名を埋め込んで OpenAI 互換 Chat Completions に渡す. 多言語対応はモデル依存 | 同上 |
+| **openai-realtime** | `gpt-realtime-whisper` が**自動検出** (source 指定はメタ情報) | `audio.output.language` に target コードを設定 |
+| **gemini-realtime** | live-translate が処理 | `translationConfig.targetLanguageCode` に設定 |
+| **openai-chat** | プロンプトに言語名を埋め込み (多言語対応はモデル依存) | 同上 |
+| **mlx** | プロンプトに言語名を埋め込み (品質は言語ペア依存) | 同上 |
 
-#### OpenAI の制約
+#### OpenAI / Gemini の制約
 
-`gpt-realtime-translate` は **target が ~13 言語に限定** (公式仕様). 範囲外を指定すると API がエラーを返します. 本ツールは事前 validation は行わず API エラーに委ねる方針です. 不明な場合は OpenAI の [Realtime Translation ドキュメント](https://developers.openai.com/api/docs/guides/realtime-translation) を参照してください。
+`gpt-realtime-translate` は **target が ~13 言語に限定** (公式仕様)。範囲外を指定すると API がエラーを返します。本ツールは事前 validation せず API エラーに委ねます。詳細は [OpenAI Realtime Translation ドキュメント](https://developers.openai.com/api/docs/guides/realtime-translation) を参照。
 
-### モデルの切り替え
+### モデルの切り替え (mlx)
 
 ```bash
-# 既定 (E4B 4bit, 品質と速度のバランス)
-uv run realtime-interpreter
-
-# 軽量・高速 (E2B 4bit)
-uv run realtime-interpreter --model e2b
-
-# 高品質 (E4B bf16, 量子化なし)
-uv run realtime-interpreter --model e4b-bf16
-
-# プリセット一覧
-uv run realtime-interpreter --list-models
-
-# 任意の HuggingFace ID も渡せる ("/" を含む文字列)
-uv run realtime-interpreter --model mlx-community/some-other-model
-
-# 環境変数で永続的に上書き
-export REALTIME_INTERPRETER_MODEL=e2b
-uv run realtime-interpreter
+uv run realtime-interpreter --backend mlx --model e2b   # 軽量・高速
+uv run realtime-interpreter --backend mlx --list-models # プリセット一覧
 ```
 
 | エイリアス | モデル ID | 用途 |
@@ -368,132 +347,104 @@ uv run realtime-interpreter
 
 ## 定期要約 (1 分ごと)
 
-既定で 60 秒ごとに、過去 60 秒間の **英文の文字起こし** を日本語で要約してターミナルに表示します。要約モデルは翻訳と同じ Gemma 4 をテキスト専用モードで再利用するため、追加 RAM は不要です。
+既定で 60 秒ごとに、過去 60 秒間の **source 言語の文字起こし** を target 言語で要約して表示します。要約経路はバックエンドごとに異なります:
 
-```
-[01:23] We're driven by the idea that the products we create should help unleash creativity.
-[01:23] 私たちは、私たちが作る製品が創造性を解き放つ手助けをするべきだという考えに突き動かされています。
-
---- 要約 [01:24] ---
-過去1分間は、Apple のクラウドインフラストラクチャ戦略についての導入であった。
-App Store や Apple Music などのサービスが AWS と自社データセンターを組み合わせて
-運用されていることが説明された。
----
-```
-
-要約推論には 1〜3 秒かかる間、翻訳パイプラインが一時停止します (MLX GPU stream を共有するため)。1 分に 1 回なので体感はほぼ気にならないはず。
+- **openai-realtime**: OpenAI Chat Completions (`gpt-5-mini`)。ライブ翻訳と同じ `OPENAI_API_KEY` で動作
+- **gemini-realtime**: `gemini-3.1-flash-lite`, APIキーもライブ翻訳と同じ
+- **openai-chat**: 同じ OpenAI 互換 REST API
+- **mlx**: ライブ翻訳と同じ Gemma4 をテキスト専用モードで再利用
 
 ```bash
-# 要約を無効化
-uv run realtime-interpreter --summary-interval-seconds 0
-
-# 30 秒ごとに要約 (短い会話の検証用)
-uv run realtime-interpreter --summary-interval-seconds 30
+uv run realtime-interpreter --summary-interval-seconds 0    # 要約を無効化
+uv run realtime-interpreter --summary-interval-seconds 30   # 30 秒ごと
 ```
 
-要約モデルのプロンプトは [`src/realtime_interpreter/summarizer.py`](src/realtime_interpreter/summarizer.py) の `SUMMARY_PROMPT_TEMPLATE` で調整できます。
+要約プロンプトは [`src/realtime_interpreter/summarizer.py`](src/realtime_interpreter/summarizer.py) で調整できます。
 
-## チャンクサイズの調整
+## チャンクサイズ / 確定タイミングの調整
 
-「文の刻みをもう少し細かくしたい / 長台詞を待たずに早く出したい」場合は、CLI フラグで簡単に切り替えられます。
+「文の刻みを細かくしたい / 長台詞を待たずに早く出したい / 細切れを減らしたい」場合に調整します。フラグはバックエンドごとに独立です。
 
 ```bash
-# 短い間 (200ms) で区切る → 反応が早いが文が分断されやすい
-uv run realtime-interpreter --end-silence-ms 200
+# openai-realtime: debounce と強制カット上限
+uv run realtime-interpreter --openai-rt-debounce-ms 500 --openai-rt-max-segment-seconds 8
 
-# 連続発話でも 5 秒で強制カット
-uv run realtime-interpreter --max-segment-seconds 5
+# gemini-realtime: 細切れが気になるなら debounce を上げて束ねる
+uv run realtime-interpreter --backend gemini-realtime --gemini-rt-debounce-ms 1500
 
-# 両方併用してかなり細切れに
-uv run realtime-interpreter --end-silence-ms 250 --max-segment-seconds 6
+# mlx / openai-chat: VAD の無音長と最大セグメント長
+uv run realtime-interpreter --backend mlx --end-silence-ms 500 --max-segment-seconds 6
 ```
 
-| 設定例 | 体感 |
+| debounce / end-silence | トレードオフ |
 |---|---|
-| `--end-silence-ms 800 --max-segment-seconds 8` (既定) | 文単位でしっかり区切られる. 翻訳品質優先 |
-| `--end-silence-ms 500 --max-segment-seconds 8` | やや早めに区切る. バランス型 |
-| `--end-silence-ms 300 --max-segment-seconds 6` | レスポンス重視. 文が途中で切れやすくなる |
-| `--end-silence-ms 200 --max-segment-seconds 5` | 細切れ. 反応速度優先, 文が途中で切れることがある |
+| 短い (200〜500ms) | レスポンス重視. ただし途中で commit して対応がズレる可能性 |
+| 800ms (既定) | バランス. 通常の発話間ポーズで commit |
+| 長い (1500〜2500ms) | 段落単位で commit. 対応は確実だが表示は遅延 |
 
 ### その他のチューニング (ソース直書き)
 
-`src/realtime_interpreter/audio.py` の冒頭で調整:
+`src/realtime_interpreter/audio.py` の冒頭 (mlx / openai-chat の VAD):
 
 | 定数 | 既定 | 意味 |
 |---|---|---|
-| `VAD_THRESHOLD` | 0.3 | 発話判定の確率しきい値 (低くすると小さい音も発話扱い) |
+| `VAD_THRESHOLD` | 0.3 | 発話判定の確率しきい値 |
 | `MIN_SEGMENT_SECONDS` | 0.5 | これより短いセグメントはノイズとして捨てる |
 
-## スモークテスト (静的 wav/flac)
-
-リアルタイムキャプチャを始める前に、音声ファイルで翻訳が機能するか確認できます:
+## スモークテスト / ユニットテスト
 
 ```bash
-# 既定モデル (e4b) で実行
+# 音声ファイルで mlx の翻訳を確認 (macOS)
 uv run python scripts/smoke_test.py samples/test_en_librispeech.flac
 
-# 別モデルで試す
-uv run python scripts/smoke_test.py samples/test_en_librispeech.flac e2b
-```
-
-`samples/test_en_librispeech.flac` は LibriSpeech の標準テストサンプル (5.86 秒)。
-
-## ユニットテスト
-
-```bash
+# ユニットテスト一式
 uv run pytest
 ```
 
-含まれるテスト:
-- `tests/test_translator_resolve.py`: モデルエイリアス解決ロジック
-- `tests/test_translator_parse.py`: モデル出力 (`EN: / JA:`) のパーサ
+## レイテンシ
 
-## レイテンシ (M3 Max 実測ベース)
-
-| 段階 | 実測 |
-|---|---|
-| モデルロード (キャッシュ済) | 約 2.6 秒 |
-| 5.86 秒音声 → EN+JA 出力 | 約 1.0 秒 |
-
-実機での体感レイテンシは「発話終了 (無音 800ms 検知) + 推論 (発話長に応じて 0.5〜2 秒)」で、目安として **発話終了から 1.5〜3 秒で画面に表示** されます。
+実機での体感は「発話終了 (無音検知) + 推論」で、目安として**発話終了から 1.5〜3 秒で画面に表示**されます。mlx (M3 Max) は 5.86 秒音声 → EN+JA 出力が約 1.0 秒、モデルロード (キャッシュ済) 約 2.6 秒。クラウドバックエンドはネットワーク往復に依存します。
 
 ## 料金の目安
 
-### MLX バックエンド (既定)
-
-すべてローカル実行のため **無料**. 電力消費のみ。
-
-### OpenAI バックエンド
-
-主要コストは Realtime API の翻訳分。要約は誤差レベル。
+### openai-realtime
 
 | 項目 | 単価 | 1 時間あたり |
 |---|---|---|
 | `gpt-realtime-translate` (翻訳) | $0.034/分 | 約 $2.04 |
-| `gpt-realtime-whisper` (英文の文字起こし) | $0.017/分 | 約 $1.02 |
-| `gpt-5-mini` (要約, 60s ごと) | 約 $0.0003/回 | 約 **$0.02** |
-| **合計** | | **約 $3.08 / 時** |
+| `gpt-realtime-whisper` (文字起こし) | $0.017/分 | 約 $1.02 |
+| `gpt-5-mini` (要約, 60s ごと) | 約 $0.0003/回 | 約 $0.02 |
+| **合計** | | **約 $3.08 / 時** (1 営業日 8h ≈ $25) |
 
-```
-1 セッション (1時間連続)  ≈ $3.08
-1 営業日 (8時間)          ≈ $25
-1 ヶ月 (営業日 20 日)     ≈ $500
-```
+詳細は [OpenAI Realtime 料金ページ](https://developers.openai.com/api/docs/models/gpt-realtime-translate)。
 
-詳細は [OpenAI Realtime 料金ページ](https://developers.openai.com/api/docs/models/gpt-realtime-translate) を参照。
+### gemini-realtime
+
+**無料枠**: live-translate プレビューは無料枠で利用でき、要約の `gemini-3.1-flash-lite` も無料枠の RPD が大きい (実測 ~500 RPD)。無料枠の制限内なら実質無料で運用できます。
+
+**無料枠を使わない場合 (有料ティア)**:
+
+| 項目 | 単価 | 1 時間あたり |
+|---|---|---|
+| `gemini-3.5-live-translate-preview` 入力音声 | $3.50/1M tok (≈ $0.0053/分) | 約 $0.32 |
+| `gemini-3.5-live-translate-preview` 出力音声 | $21.00/1M tok (≈ $0.0315/分) | 約 $1.89 |
+| `gemini-3.1-flash-lite` (要約, 60s ごと) | $0.25/1M (入力) + $1.50/1M (出力) | 約 $0.04 |
+| **合計** | | **約 $2.25 / 時** |
+
+出力音声 (TTS) は本ツールでは使わず翻訳テキストのみ利用しますが、`responseModalities=["AUDIO"]` のため課金対象になり、コストの約 85% を占めます。最新の価格・無料枠は [Gemini API 料金ページ](https://ai.google.dev/gemini-api/docs/pricing) を参照 (preview モデルのため変動の可能性あり)。
+
+### openai-chat / mlx
+
+ローカル実行のため**無料** (電力消費のみ)。
 
 ## 既知の制限事項
 
-- 英語→日本語のみ
-- mlx バックエンドは macOS (Apple Silicon) 専用 (mlx-vlm に依存). `openai` / `openai-chat` バックエンドは macOS / Windows で動作 (Windows は WASAPI ループバックで音声取り込み)
-- macOS の入力デバイスは BlackHole 2ch を想定. Windows は既定スピーカー等の出力デバイスを WASAPI loopback で取り込む
+- mlx バックエンドは macOS (Apple Silicon) 専用。`openai-realtime` / `gemini-realtime` / `openai-chat` は macOS / Windows で動作
+- macOS の入力は BlackHole 2ch を想定。Windows は既定スピーカー等を WASAPI loopback で取り込む
 - Gemma 4 の音声入力は E2B / E4B 系のみ対応 (26B MoE / 31B Dense は不可)
-- セグメント完結まで何も表示されない設計 (低レイテンシ最優先ではなく、確定済み出力のストリームを目的とする)
-- 要約機能はバックエンドごとに別経路 — MLX: ローカル Gemma 4 (text-only) を再利用 / OpenAI: Chat Completions API (`gpt-5-mini` 等) / openai-chat: 同じ OpenAI 互換 REST API
-
-## 設計方針
-
-過去の試行で **暫定→確定 (LocalAgreement-2)** UX も実装したが、独立窓ベースだと幻覚が多くなるため廃止した。現行は **「VAD で発話単位を区切り、完結した発話を 1 回だけ翻訳して表示」** という単純な append-only 設計を採用している。
+- リアルタイム両バックエンドは入力文字起こしと訳が別ストリームのため、行頭の対応が 1 セグメント程度ずれることがある
+- セグメント完結まで確定行は表示されない設計 (確定済み出力のストリームを目的とする)
+- 再接続 (openai-realtime) の瞬間に 1 フレーズ程度欠落することがある
 
 ## ライセンス
 
