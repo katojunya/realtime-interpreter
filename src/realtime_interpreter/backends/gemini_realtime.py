@@ -279,6 +279,13 @@ class GeminiRealtimeBackend:
         else:
             setup["sessionResumption"] = {}
 
+        # Context Window Compression を有効化 (sliding window, 既定パラメータ).
+        # session resumption が「~10分の接続切断」を乗り越えるのに対し、こちらは
+        # 「15分のセッション時間 / 128k トークン上限」を回避してセッションを無制限に延長する。
+        # 両者は独立機構で、長時間 (数時間〜) 運用には両方必要。
+        # 短時間セッションでは sliding window は発動しないため常時有効でも無害。
+        setup["contextWindowCompression"] = {"slidingWindow": {}}
+
         msg = {"setup": setup}
         self._ws.send(json.dumps(msg))
         # ハンドルはログに出さない (機密に近いため). resume フラグのみ記録。
