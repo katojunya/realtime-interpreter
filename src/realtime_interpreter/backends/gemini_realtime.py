@@ -398,14 +398,14 @@ class GeminiRealtimeBackend:
         pcm16 = np.clip(audio, -1.0, 1.0)
         pcm16 = (pcm16 * 32767.0).astype(np.int16)
         b64 = base64.b64encode(pcm16.tobytes()).decode("ascii")
+        # 公式 live-translate ドキュメントの現行形式 `realtimeInput.audio` を使う。
+        # (旧形式 `realtimeInput.mediaChunks[]` はレガシーのため移行済み)
         msg = {
             "realtimeInput": {
-                "mediaChunks": [
-                    {
-                        "mimeType": "audio/pcm;rate=16000",
-                        "data": b64
-                    }
-                ]
+                "audio": {
+                    "data": b64,
+                    "mimeType": f"audio/pcm;rate={GEMINI_SAMPLE_RATE}",
+                }
             }
         }
         self._ws.send(json.dumps(msg))
