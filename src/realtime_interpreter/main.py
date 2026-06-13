@@ -96,7 +96,10 @@ DEFAULT_SUMMARY_INTERVAL_SECONDS = 60
 SUPPORTED_BACKENDS = ("openai-realtime", "openai-chat", "mlx", "gemini-realtime")
 
 DEFAULT_GEMINI_MODEL = "models/gemini-3.5-live-translate-preview"
-DEFAULT_GEMINI_SUMMARY_MODEL = "gemini-3.5-flash"
+# 要約は軽いテキストタスク. flash-lite は無料枠 RPD が大きく (実測 500 RPD)、
+# 60秒間隔の長時間会議でも枯渇しにくいため既定に採用。
+# (gemini-3.5-flash は無料枠 RPD=20 と少なく、20分程度で 429 に達する)
+DEFAULT_GEMINI_SUMMARY_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_GEMINI_DEBOUNCE_MS = 800
 DEFAULT_GEMINI_MAX_SEGMENT_SECONDS = 8.0
 
