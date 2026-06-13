@@ -38,6 +38,10 @@ DEFAULT_OPENAI_SUMMARY_MODEL = "gpt-5-mini"
 # thinking で使い切って content が空になる。
 OPENAI_SUMMARY_MAX_COMPLETION_TOKENS = 2048
 
+# Gemini REST 要約の出力上限. thinking は thinkingBudget=0 で無効化するため、
+# この値はほぼ全部が本文に使える。日本語要約 2〜4 文に十分な余裕を持たせる。
+GEMINI_SUMMARY_MAX_OUTPUT_TOKENS = 1024
+
 
 SUMMARY_PROMPT_TEMPLATE = (
     "You are an expert at summarizing {source_language} speech into {target_language}. "
@@ -282,7 +286,13 @@ class GeminiRESTSummarizer:
             }],
             "generationConfig": {
                 "temperature": 0.3,
-                "maxOutputTokens": 256
+                # Gemini 3.x Flash は thinking モデル. maxOutputTokens には thinking
+                # トークンも含まれるため、256 だと thinking で使い切って本文が途切れる。
+                # 余裕を持たせる。
+                "maxOutputTokens": GEMINI_SUMMARY_MAX_OUTPUT_TOKENS,
+                # 要約タスクでは内部推論は不要. thinkingBudget=0 で無効化し、
+                # 出力予算を全部本文に回す (Flash 系で対応)。
+                "thinkingConfig": {"thinkingBudget": 0},
             }
         }
 
@@ -298,7 +308,19 @@ class GeminiRESTSummarizer:
             with urllib.request.urlopen(request, timeout=30.0) as response:
                 body = response.read().decode("utf-8")
             res_json = json.loads(body)
-            text = res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+            candidate = res_json["candidates"][0]
+            finish = candidate.get("finishReason", "")
+            # 複数 part を結合 (thinking 無効でも分割される場合がある)
+            parts = candidate.get("content", {}).get("parts", [])
+            text = "".join(
+                p.get("text", "") for p in parts if isinstance(p, dict)
+            ).strip()
+            if finish == "MAX_TOKENS":
+                logger.warning(
+                    "Gemini summary truncated (MAX_TOKENS). "
+                    "Consider raising GEMINI_SUMMARY_MAX_OUTPUT_TOKENS (current=%d).",
+                    GEMINI_SUMMARY_MAX_OUTPUT_TOKENS,
+                )
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8") if e.fp else ""
             logger.error("Gemini summary HTTP error (model=%s) code=%d: %s, body=%s", self.model, e.code, e.reason, err_body)
