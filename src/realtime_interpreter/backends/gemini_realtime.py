@@ -2,7 +2,9 @@
 
 WebSocket 経由で 16kHz PCM16 音声をストリームし、source 言語の転写（inputAudioTranscription）と
 target 言語訳（modelTurn）の delta を受け取る。
-ターン終了はサーバーから送られる `turnComplete: true` イベントで確定する。
+セグメントの確定は emit_loop の debounce（一定時間 delta が来ない＝発話の切れ目）と
+max_segment（連続発話の強制カット上限）で行う。サーバの `turnComplete` は短い翻訳単位
+ごとに頻発し過剰分割を招くため、確定トリガとしては使わない（連続ターンを束ねる）。
 """
 
 from __future__ import annotations
@@ -613,10 +615,13 @@ class GeminiRealtimeBackend:
                     self._append_output(text_part)
 
         # 3. Turn complete
-        if server_content.get("turnComplete"):
-            with self._pending_lock:
-                if self._pending_turn is not None:
-                    self._emit_pending_locked()
+        # NOTE: ここで即コミットしない。live-translate は短い翻訳単位ごとに
+        # turnComplete を頻発させるため、即コミットするとセグメントが過剰分割される
+        # (1〜数語の細切れが多発)。代わりに確定は emit_loop の debounce(無音検出)
+        # と max_segment(連続発話の上限)だけに委ね、連続するターンを 1 セグメントに
+        # 束ねる。これにより openai-realtime と同等の読みやすい粒度になる。
+        # turnComplete は「ひと続きの翻訳が一段落した」マーカーに過ぎず、その後 deltas が
+        # 来なければ debounce が、来続ければ max_segment が確定させる。
 
     def _ensure_pending_locked(self) -> None:
         if self._pending_turn is None:
