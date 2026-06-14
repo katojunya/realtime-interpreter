@@ -66,11 +66,6 @@ TURN_DEBOUNCE_MS = 800
 # 0 を指定すると無効 (debounce のみで commit).
 OPENAI_MAX_SEGMENT_SECONDS = 8.0
 
-# 文末判定ヘルパは保持 (将来 sentence-level splitting を再有効化する場合の参考実装).
-# 現在は EN/JA の切れ目が一致しないため commit には使用しない。
-JA_SENTENCE_ENDS = "。？！?!"
-EN_SENTENCE_ENDS = ".!?"
-
 # debounce が早く commit したあとに遅れて届いた文末記号が、次セグメントの先頭に
 # 流れ込むことがある (例: "[07:43] 。18年..." の先頭の "。"). これを除去するための
 # 行頭文字セット. 半角/全角の句読点・記号 + 各種空白。
@@ -84,46 +79,6 @@ def _clean_leading(text: str) -> str:
     次セグメントの先頭に来てしまったものを取り除く。中間・末尾の記号は保持。
     """
     return text.lstrip(_LEADING_PUNCT)
-
-
-def _first_complete_sentence_end_ja(text: str) -> int | None:
-    """JA の最初の文末記号位置 (記号の直後の index) を返す. 無ければ None.
-
-    JA は省略記号や略語の曖昧性が無視できるレベルなので単純に走査する。
-    """
-    for i, ch in enumerate(text):
-        if ch in JA_SENTENCE_ENDS:
-            return i + 1
-    return None
-
-
-def _first_complete_sentence_end_en(text: str) -> int | None:
-    """EN の最初の文末記号位置 (記号の直後の index) を返す. 無ければ None.
-
-    曖昧性を避けるための条件:
-    - "..." (省略記号) の `.` ではマッチしない (次の文字も `.` ならスキップ)
-    - 略語 (Mr./Dr./e.g. 等) の `.` を避けるため、文末記号の直後に
-      空白 or 改行が必要 (= 文末確定)
-    - バッファ末尾の `.` は次の delta を待つ (確定不能)
-    """
-    n = len(text)
-    for i, ch in enumerate(text):
-        if ch not in EN_SENTENCE_ENDS:
-            continue
-        # 省略記号 "..." の一部はスキップ (前後どちらかに `.` が隣接)
-        if ch == ".":
-            prev_is_dot = i > 0 and text[i - 1] == "."
-            next_is_dot = i + 1 < n and text[i + 1] == "."
-            if prev_is_dot or next_is_dot:
-                continue
-        # 文末確定には直後に空白が必要 (略語の `Mr.Smith` を回避)
-        if i + 1 >= n:
-            # バッファ末尾 → 次 delta を待つ
-            return None
-        if text[i + 1].isspace():
-            return i + 1
-        # 略語の途中 (例: "Mr.Smith" や "U.S.A") はスキップ
-    return None
 
 
 def _find_input_device(name: str, sd_module: ModuleType) -> int:
@@ -715,74 +670,6 @@ class OpenAIRealtimeBackend:
             self._pending_turn.target_parts.append(delta)
             self._pending_turn.last_activity_at = time.monotonic()
             self._emit_partial_locked()
-
-    def _process_sentence_boundaries_locked(self) -> None:
-        """Pending turn から完結した文を抽出して final として emit する.
-
-        - JA と EN の両方に文末記号が見つかったら、それぞれの最初の文末で切って
-          1 つの確定セグメント (final) として queue に push.
-        - 残り (carryover) は新しい pending turn として継続. carryover に
-          まだ文末が含まれていればループで連続コミット.
-        - 文末が見つからない場合は partial を emit して in-progress 表示を更新.
-        """
-        while True:
-            if self._pending_turn is None:
-                return
-            tgt_text = self._pending_turn.target()
-            src_text = self._pending_turn.source()
-
-            tgt_idx = _first_complete_sentence_end_ja(tgt_text)
-            src_idx = _first_complete_sentence_end_en(src_text)
-
-            if tgt_idx is None or src_idx is None:
-                # 両方に文末が無いと commit できない. 現状を partial として表示.
-                if self._pending_turn.has_content():
-                    self._emit_partial_locked()
-                return
-
-            # 両方に文末あり → 切って commit
-            self._commit_prefix_as_final_locked(src_idx, tgt_idx)
-            # ループ: carryover にさらなる文末が含まれているかチェック
-
-    def _commit_prefix_as_final_locked(self, src_end: int, tgt_end: int) -> None:
-        """Pending turn の en[:en_end] / ja[:ja_end] を final で emit, 残りは新 pending."""
-        assert self._pending_turn is not None
-        turn = self._pending_turn
-        src_full = turn.source()
-        tgt_full = turn.target()
-
-        src_commit = src_full[:src_end].strip()
-        tgt_commit = tgt_full[:tgt_end].strip()
-
-        if src_commit or tgt_commit:
-            duration = max(0.0, turn.last_activity_at - turn.started_at)
-            seg = TranslatedSegment(
-                start_offset_seconds=turn.start_offset_seconds,
-                duration_seconds=duration,
-                source=src_commit,
-                target=tgt_commit,
-                is_partial=False,
-            )
-            self._segment_queue.put(seg)
-
-        src_rem = src_full[src_end:]
-        tgt_rem = tgt_full[tgt_end:]
-
-        if not src_rem.strip() and not tgt_rem.strip():
-            # carryover なし → pending クリア (in-progress 表示も次の commit() でクリア済み)
-            self._pending_turn = None
-            return
-
-        # carryover を新しい pending として開始. start_offset は現在時刻に更新。
-        now = time.monotonic()
-        offset = now - (self._capture_start_monotonic or now)
-        self._pending_turn = _PendingTurn(
-            start_offset_seconds=offset,
-            started_at=now,
-            last_activity_at=now,
-            source_parts=[src_rem] if src_rem else [],
-            target_parts=[tgt_rem] if tgt_rem else [],
-        )
 
     # ---------------- emit loop (debounce) ----------------
 
