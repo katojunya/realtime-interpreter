@@ -21,11 +21,13 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import time
 import urllib.error
 import urllib.request
 import wave
+from collections import deque
 from dataclasses import dataclass
 from types import ModuleType, TracebackType
 from typing import Iterator
@@ -68,14 +70,70 @@ OPENAI_CHAT_AUDIO_PROMPT = (
     "TGT: <natural {target_language} translation>\n"
     "\n"
     "Rules:\n"
+    "- Transcribe ONLY actual spoken words that you can clearly hear.\n"
     "- Keep technical terms (CPU, AWS, GPU, API, etc.) in their original form "
     "where natural.\n"
-    "- Do not invent content. Translate only what is clearly audible.\n"
+    "- Do not invent, summarize, continue, or guess beyond what is audible.\n"
     "- Do not repeat words or phrases.\n"
-    "- If the audio is silent or unintelligible, output exactly:\n"
-    "  SRC:\n"
-    "  TGT:\n"
+    "- If the audio is silence, music, applause, noise, or any non-speech "
+    "sound, output empty SRC and TGT. Do NOT describe the sound.\n"
+    "- NEVER output filler or placeholder sentences such as "
+    '"I\'m going to give you an overview...", "Let me show you...", or '
+    '"I\'m going to give you a little bit of background...". '
+    "If no words are spoken, leave both lines empty.\n"
+    "\n"
+    "Example when the audio has no speech:\n"
+    "SRC:\n"
+    "TGT:\n"
 )
+
+
+# 幻覚抑制 (層2a): 直近セグメントと逐語一致する転写を弾く。
+# 小型ローカルモデルは音楽/拍手/無音の区間で "I'm going to give you a little
+# bit of background..." のような尤もらしい定型文を生成し、それらはセッション内で
+# 逐語反復する傾向がある。実発話で同一文が短期間に逐語一致するのは稀なので、
+# 直近 N 件と一致したセグメントを幻覚とみなして破棄する。
+_DEDUP_WS_RE = re.compile(r"\s+")
+_DEDUP_STRIP = " 　.,!?;:。、！？…・「」『』\"'“”’‘()（）"
+
+
+def _normalize_for_dedup(text: str) -> str:
+    """重複判定用の正規化 (小文字化・空白圧縮・前後の記号除去)."""
+    norm = _DEDUP_WS_RE.sub(" ", text.strip().lower())
+    return norm.strip(_DEDUP_STRIP)
+
+
+class _RepetitionGuard:
+    """過去の転写と逐語一致するセグメントを幻覚として検出する.
+
+    幻覚の定型句はセッション内で数十分離れて再出現するため、既定では
+    セッション全体 (history=None) で逐語一致を判定する。history に整数を渡すと
+    直近 N 件の窓だけを対象にする (近接重複のみ弾きたい場合)。
+
+    min_chars 未満の短い発話 (相づち・固有名詞など) は、正当な反復を誤って
+    弾かないよう判定対象外にする。長い定型句 (= 厄介な幻覚) のみを束ねる。
+    """
+
+    def __init__(self, history: int | None = None, min_chars: int = 12) -> None:
+        self._min_chars = min_chars
+        self._seen: set[str] = set()
+        self._window: deque[str] | None = (
+            deque(maxlen=history) if history else None
+        )
+
+    def is_repeat(self, source: str) -> bool:
+        norm = _normalize_for_dedup(source)
+        if len(norm) < self._min_chars:
+            return False
+        if self._window is None:
+            if norm in self._seen:
+                return True
+            self._seen.add(norm)
+            return False
+        if norm in self._window:
+            return True
+        self._window.append(norm)
+        return False
 
 
 @dataclass
@@ -256,6 +314,7 @@ class OpenAIChatBackend:
         max_segment_seconds: float = MAX_SEGMENT_SECONDS,
     ) -> None:
         self.translator = translator
+        self._repetition_guard = _RepetitionGuard()
         if sys.platform == "win32":
             self._capture = WindowsLoopbackSpeechSegmentCapture(
                 device_name=device_name,
@@ -288,6 +347,13 @@ class OpenAIChatBackend:
                 result = self.translator.translate(segment.audio)
             except Exception:
                 logger.exception("openai-chat translation failed")
+                continue
+            # 幻覚抑制 (層2a): 直近と逐語一致する転写は破棄する。
+            if self._repetition_guard.is_repeat(result.source):
+                logger.debug(
+                    "dropped repeated (likely hallucinated) segment: %r",
+                    result.source,
+                )
                 continue
             yield TranslatedSegment(
                 start_offset_seconds=segment.start_offset_seconds,
