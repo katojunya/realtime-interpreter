@@ -84,8 +84,9 @@ from realtime_interpreter.session_logger import SessionLogger, format_offset
 from realtime_interpreter.summarizer import (
     DEFAULT_OPENAI_SUMMARY_MODEL,
     OpenAIChatSummarizer,
+    Summarizer,
 )
-# NOTE: mlx バックエンド固有の import (LocalMLXBackend / GemmaAudioTranslator / Summarizer)
+# NOTE: mlx バックエンド固有の import (LocalMLXBackend / GemmaAudioTranslator / MLXSummarizer)
 # は _build_backend() の mlx 分岐内で遅延 import する。これにより mlx 未インストールの
 # Windows/Linux でも mlx 以外のバックエンドが動く。
 # 定数 (DEVICE_NAME 等, MODEL_PRESETS, DEFAULT_ALIAS) は軽量なので下で参照する。
@@ -627,7 +628,7 @@ def _build_backend(
     args: argparse.Namespace,
 ) -> tuple[
     TranslationBackend,
-    Summarizer | OpenAIChatSummarizer | OpenAIChatCompatibleSummarizer | None,
+    Summarizer | None,
 ]:
     summary_enabled = args.summary_interval_seconds > 0
     src = normalize_language_code(args.source_lang)
@@ -647,7 +648,7 @@ def _build_backend(
         # mlx 系は macOS 専用依存. ここで遅延 import (Windows では到達しない)。
         try:
             from realtime_interpreter.backends.mlx_local import LocalMLXBackend
-            from realtime_interpreter.summarizer import Summarizer
+            from realtime_interpreter.summarizer import MLXSummarizer
             from realtime_interpreter.translator import GemmaAudioTranslator
         except ImportError as e:
             raise SystemExit(
@@ -674,7 +675,7 @@ def _build_backend(
             max_segment_seconds=args.max_segment_seconds,
         )
         summarizer = (
-            Summarizer(translator, source_lang=src, target_lang=tgt)
+            MLXSummarizer(translator, source_lang=src, target_lang=tgt)
             if summary_enabled
             else None
         )
@@ -862,7 +863,7 @@ def _emit_settings(args: argparse.Namespace) -> None:
 
 def _submit_summary_task(
     executor: ThreadPoolExecutor,
-    summarizer: Summarizer | OpenAIChatSummarizer | OpenAIChatCompatibleSummarizer,
+    summarizer: Summarizer,
     source_buffer: list[tuple[float, str]],
     since_offset: float,
     until_offset: float,

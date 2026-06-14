@@ -1,13 +1,16 @@
 """要約モジュール.
 
-2 つのバックエンドを提供する:
+要約器を複数提供する:
 
-- `Summarizer` (ローカル): 翻訳と同じ Gemma 4 モデルをテキスト専用モードで再利用.
+- `MLXSummarizer` (ローカル): 翻訳と同じ Gemma 4 モデルをテキスト専用モードで再利用.
   MLX バックエンド利用時に翻訳モデルを共有する想定. 追加 RAM 不要.
 - `OpenAIChatSummarizer` (クラウド): OpenAI Chat Completions API で gpt-5-mini 等を呼ぶ.
   OpenAI バックエンドと同じ API キーで使える. Realtime API とは別経路.
+- `GeminiRESTSummarizer` (クラウド): Gemini REST generateContent を叩く.
+- `OpenAIChatCompatibleSummarizer` (openai_chat.py): Ollama 等の互換エンドポイント.
 
-どちらも同じ `summarize(source_text, duration_seconds) -> SummaryResult` インターフェース。
+すべて `Summarizer` Protocol (= `summarize(source_text, duration_seconds) -> SummaryResult`)
+に従うため、呼び出し側は具象クラスを意識せず同一インターフェースで扱える。
 プロンプトは英語で、source/target 言語名を placeholder で埋める方式。
 """
 
@@ -17,7 +20,9 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
+from realtime_interpreter._http import HttpError, post_json
 from realtime_interpreter.i18n import DEFAULT_SOURCE, DEFAULT_TARGET, language_name
 
 logger = logging.getLogger(__name__)
@@ -66,6 +71,22 @@ class SummaryResult:
     latency_seconds: float
 
 
+@runtime_checkable
+class Summarizer(Protocol):
+    """要約器の共通インターフェース.
+
+    具象実装 (`MLXSummarizer` / `OpenAIChatSummarizer` / `GeminiRESTSummarizer` /
+    `OpenAIChatCompatibleSummarizer`) はいずれもこのシグネチャに従う。`@runtime_checkable`
+    なので `isinstance(x, Summarizer)` で構造的に判定できる (テスト用)。
+    """
+
+    source_lang: str
+    target_lang: str
+
+    def summarize(self, source_text: str, duration_seconds: int) -> SummaryResult:
+        ...
+
+
 def build_summary_prompt(
     source_text: str,
     duration_seconds: int,
@@ -81,7 +102,7 @@ def build_summary_prompt(
     )
 
 
-class Summarizer:
+class MLXSummarizer:
     """共有された Gemma 4 モデルで target 言語の要約を生成する.
 
     Translator が既にロードしたモデルインスタンスをそのまま使う。
@@ -269,10 +290,6 @@ class GeminiRESTSummarizer:
             logger.warning("Gemini API key is missing. Cannot generate summary.")
             return SummaryResult(text="", latency_seconds=0.0)
 
-        import urllib.request
-        import urllib.error
-        import json
-
         prompt_text = build_summary_prompt(
             source_text, duration_seconds,
             source_lang=self.source_lang,
@@ -296,18 +313,9 @@ class GeminiRESTSummarizer:
             }
         }
 
-        data = json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(
-            url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-        )
-
         t0 = time.perf_counter()
         try:
-            with urllib.request.urlopen(request, timeout=30.0) as response:
-                body = response.read().decode("utf-8")
-            res_json = json.loads(body)
+            res_json = post_json(url, payload, timeout=30.0)
             candidate = res_json["candidates"][0]
             finish = candidate.get("finishReason", "")
             # 複数 part を結合 (thinking 無効でも分割される場合がある)
@@ -321,9 +329,11 @@ class GeminiRESTSummarizer:
                     "Consider raising GEMINI_SUMMARY_MAX_OUTPUT_TOKENS (current=%d).",
                     GEMINI_SUMMARY_MAX_OUTPUT_TOKENS,
                 )
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode("utf-8") if e.fp else ""
-            logger.error("Gemini summary HTTP error (model=%s) code=%d: %s, body=%s", self.model, e.code, e.reason, err_body)
+        except HttpError as e:
+            logger.error(
+                "Gemini summary HTTP error (model=%s) code=%d: %s, body=%s",
+                self.model, e.code, e.reason, e.body,
+            )
             return SummaryResult(text="", latency_seconds=time.perf_counter() - t0)
         except Exception:
             logger.exception("Gemini summary failed (model=%s)", self.model)

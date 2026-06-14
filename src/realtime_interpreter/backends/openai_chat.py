@@ -18,13 +18,10 @@ from __future__ import annotations
 
 import base64
 import io
-import json
 import logging
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
 import wave
 from dataclasses import dataclass
 from types import ModuleType, TracebackType
@@ -32,6 +29,7 @@ from typing import Iterator
 
 import numpy as np
 
+from realtime_interpreter._http import HttpError, post_json
 from realtime_interpreter.audio import (
     END_SILENCE_MS,
     MAX_SEGMENT_SECONDS,
@@ -150,22 +148,15 @@ def _post_json(
     api_key: str,
     timeout_seconds: float,
 ) -> dict:
-    data = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"openai-chat HTTP {e.code}: {body}") from e
-    return json.loads(body)
+        return post_json(
+            url,
+            payload,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=timeout_seconds,
+        )
+    except HttpError as e:
+        raise RuntimeError(f"openai-chat HTTP {e.code}: {e.body}") from e
 
 
 class OpenAIChatAudioTranslator:
