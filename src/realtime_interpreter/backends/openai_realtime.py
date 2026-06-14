@@ -26,7 +26,6 @@ import json
 import logging
 import os
 import queue
-import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -35,7 +34,14 @@ from typing import Iterator
 
 import numpy as np
 
-from realtime_interpreter.audio import DEVICE_NAME
+from realtime_interpreter.audio import (
+    DEVICE_NAME,
+    find_device,
+    find_loopback_device,
+    is_windows,
+    resample_linear,
+    to_mono,
+)
 from realtime_interpreter.backends.base import TranslatedSegment
 from realtime_interpreter.i18n import DEFAULT_SOURCE, DEFAULT_TARGET
 
@@ -79,79 +85,6 @@ def _clean_leading(text: str) -> str:
     次セグメントの先頭に来てしまったものを取り除く。中間・末尾の記号は保持。
     """
     return text.lstrip(_LEADING_PUNCT)
-
-
-def _find_input_device(name: str, sd_module: ModuleType) -> int:
-    devices = sd_module.query_devices()
-    for index, device in enumerate(devices):
-        if name in device["name"] and device["max_input_channels"] > 0:
-            return index
-    available = [d["name"] for d in devices]
-    raise RuntimeError(f"Device '{name}' not found. Available: {available}")
-
-
-def _is_windows() -> bool:
-    return sys.platform == "win32"
-
-
-def _to_mono(samples: np.ndarray) -> np.ndarray:
-    """インターリーブ済みステレオ (N, 2) または 1 次元をモノラル float32 に変換."""
-    if samples.ndim == 2:
-        return np.mean(samples, axis=1).astype(np.float32)
-    return samples.astype(np.float32)
-
-
-def _resample_linear(mono: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
-    """線形補間でサンプルレート変換する (依存追加なし).
-
-    WASAPI loopback はデバイスのネイティブレート (例 44100Hz) でしか録れないが、
-    OpenAI Realtime は 24kHz PCM16 を要求するため、送信前にここでダウンサンプルする。
-    音声認識用途では線形補間で十分な品質。
-    """
-    if src_rate == dst_rate or mono.size == 0:
-        return mono.astype(np.float32, copy=False)
-    n_out = int(round(mono.size * dst_rate / src_rate))
-    if n_out <= 0:
-        return np.zeros(0, dtype=np.float32)
-    x_old = np.arange(mono.size, dtype=np.float64)
-    x_new = np.linspace(0.0, mono.size - 1, n_out)
-    return np.interp(x_new, x_old, mono).astype(np.float32)
-
-
-def _find_loopback_device(pa, name: str | None):
-    """PyAudioWPatch で WASAPI loopback デバイスを解決する (Windows).
-
-    - name=None or 既定デバイス名(DEVICE_NAME) のとき: 既定出力に対応する loopback
-    - name 指定時: loopback デバイス名の部分一致
-
-    Returns: PyAudioWPatch の device info dict
-    """
-    import pyaudiowpatch as pyaudio
-
-    wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-    loopbacks = list(pa.get_loopback_device_info_generator())
-    if not loopbacks:
-        raise RuntimeError(
-            "No WASAPI loopback devices found. This environment cannot capture "
-            "system audio via loopback."
-        )
-
-    use_default = (not name) or (name == DEVICE_NAME)
-    if use_default:
-        default_out = pa.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
-        for lb in loopbacks:
-            if default_out["name"] in lb["name"]:
-                return lb
-        # 既定出力に対応する loopback が無ければ先頭を採用
-        return loopbacks[0]
-
-    for lb in loopbacks:
-        if name in lb["name"]:
-            return lb
-    available = [lb["name"] for lb in loopbacks]
-    raise RuntimeError(
-        f"Loopback device matching {name!r} not found. Available: {available}"
-    )
 
 
 @dataclass
@@ -205,7 +138,7 @@ class OpenAIRealtimeBackend:
         self._device_name = device_name
         self._device_index: int | None = None
         # loopback=None なら Windows のみ自動有効 (案 2a). 明示指定があればそれに従う。
-        self._loopback = _is_windows() if loopback is None else loopback
+        self._loopback = is_windows() if loopback is None else loopback
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         if not self._api_key:
             raise ValueError(
@@ -261,7 +194,7 @@ class OpenAIRealtimeBackend:
         if self._loopback:
             self._open_loopback_stream_windows()
         else:
-            self._device_index = _find_input_device(self._device_name, self._sd)
+            self._device_index = find_device(self._device_name, self._sd)
             self._open_audio_stream()
         self._start_threads()
         return self
@@ -381,7 +314,7 @@ class OpenAIRealtimeBackend:
             )
 
         self._pa = pyaudio.PyAudio()
-        device = _find_loopback_device(self._pa, self._device_name)
+        device = find_loopback_device(self._pa, self._device_name)
         self._capture_rate = int(device["defaultSampleRate"])
         channels = int(device["maxInputChannels"])
         self._loopback_channels = channels
@@ -396,8 +329,8 @@ class OpenAIRealtimeBackend:
                 arr = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
                 if channels > 1:
                     arr = arr.reshape(-1, channels)
-                mono = _to_mono(arr)
-                mono = _resample_linear(mono, self._capture_rate, OPENAI_SAMPLE_RATE)
+                mono = to_mono(arr)
+                mono = resample_linear(mono, self._capture_rate, OPENAI_SAMPLE_RATE)
                 if mono.size:
                     self._audio_queue.put(mono)
             except Exception:

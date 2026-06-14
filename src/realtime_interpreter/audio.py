@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import sys
 import time
 from dataclasses import dataclass
 from types import ModuleType, TracebackType
@@ -59,14 +60,14 @@ def find_device(name: str, sd_module: ModuleType) -> int:
     raise RuntimeError(f"Device '{name}' not found. Available: {available}")
 
 
-def _to_mono(samples: np.ndarray) -> np.ndarray:
+def to_mono(samples: np.ndarray) -> np.ndarray:
     """ステレオ (N, channels) または 1 次元音声をモノラル float32 に変換."""
     if samples.ndim == 2:
         return np.mean(samples, axis=1).astype(np.float32)
     return samples.astype(np.float32)
 
 
-def _resample_linear(mono: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+def resample_linear(mono: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     """線形補間でサンプルレート変換する (依存追加なし)."""
     if src_rate == dst_rate or mono.size == 0:
         return mono.astype(np.float32, copy=False)
@@ -78,7 +79,7 @@ def _resample_linear(mono: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarr
     return np.interp(x_new, x_old, mono).astype(np.float32)
 
 
-def _find_loopback_device(pa, name: str | None):
+def find_loopback_device(pa, name: str | None):
     """PyAudioWPatch で WASAPI loopback デバイスを解決する (Windows).
 
     - name=None or 既定デバイス名(DEVICE_NAME) のとき: 既定出力に対応する loopback
@@ -109,6 +110,14 @@ def _find_loopback_device(pa, name: str | None):
     raise RuntimeError(
         f"Loopback device matching {name!r} not found. Available: {available}"
     )
+
+
+def is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def is_macos() -> bool:
+    return sys.platform == "darwin"
 
 
 class _BaseSpeechSegmentCapture:
@@ -294,7 +303,7 @@ class SpeechSegmentCapture(_BaseSpeechSegmentCapture):
     ) -> None:
         if status:
             logger.warning("Audio status: %s", status)
-        self._raw_queue.put(_to_mono(indata))
+        self._raw_queue.put(to_mono(indata))
 
 
 class WindowsLoopbackSpeechSegmentCapture(_BaseSpeechSegmentCapture):
@@ -329,7 +338,7 @@ class WindowsLoopbackSpeechSegmentCapture(_BaseSpeechSegmentCapture):
 
         self._capture_start_monotonic = time.monotonic()
         self._pa = pyaudio.PyAudio()
-        device = _find_loopback_device(self._pa, self._device_name)
+        device = find_loopback_device(self._pa, self._device_name)
         self._capture_rate = int(device["defaultSampleRate"])
         channels = int(device["maxInputChannels"])
         logger.info(
@@ -343,8 +352,8 @@ class WindowsLoopbackSpeechSegmentCapture(_BaseSpeechSegmentCapture):
                 arr = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
                 if channels > 1:
                     arr = arr.reshape(-1, channels)
-                mono = _to_mono(arr)
-                mono = _resample_linear(mono, self._capture_rate, self.sample_rate)
+                mono = to_mono(arr)
+                mono = resample_linear(mono, self._capture_rate, self.sample_rate)
                 if mono.size:
                     self._raw_queue.put(mono)
             except Exception:
