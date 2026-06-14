@@ -25,5 +25,9 @@ samples/
 # benchmark inputs (large video/audio test sources, multi-GB)
 benchmark/
 
+# offline model-eval outputs and segment caches (generated at runtime)
+eval_out/
+*.npz
+
 # OS
 .DS_Store
