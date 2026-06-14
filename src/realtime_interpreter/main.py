@@ -25,7 +25,9 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 # 注意: sounddevice はモジュール先頭で import しない。
 # sounddevice は PortAudio をロードするが、ARM64 Windows ではその DLL の依存が欠けて
@@ -235,6 +237,14 @@ def _parse_args() -> argparse.Namespace:
     mlx_available = _is_macos()
     openai_chat_available = _is_macos() or _is_windows()
 
+    # --backend の選択肢はバックエンドレジストリ (_BACKENDS) から動的に導出する。
+    # プラットフォーム可用性 (mlx=macOS のみ, openai-chat=macOS/Windows) は各スペックの
+    # available() が判定するため、ここでは候補リストを手書きしない。
+    backend_choices = tuple(
+        name for name, spec in _BACKENDS.items() if spec.available()
+    )
+    backend_default = "openai-realtime"
+
     if mlx_available:
         description = (
             "Low-latency simultaneous interpreter. Default: English→Japanese. "
@@ -243,8 +253,6 @@ def _parse_args() -> argparse.Namespace:
             "OpenAI-compatible Chat Completions, local MLX (Gemma 4), "
             "or Gemini Multimodal Live API."
         )
-        backend_choices = ("openai-realtime", "openai-chat", "mlx", "gemini-realtime")
-        backend_default = "openai-realtime"
         backend_help = "Translation backend (default: openai-realtime)"
     elif _is_windows():
         description = (
@@ -253,8 +261,6 @@ def _parse_args() -> argparse.Namespace:
             "Default: English→Japanese. Use --source-lang / --target-lang "
             "(aliases: --from / --to, -s / -t) to change languages."
         )
-        backend_choices = ("openai-realtime", "openai-chat", "gemini-realtime")
-        backend_default = "openai-realtime"
         backend_help = "Translation backend (default: openai-realtime)"
     else:
         description = (
@@ -262,8 +268,6 @@ def _parse_args() -> argparse.Namespace:
             "Default: English→Japanese. Use --source-lang / --target-lang "
             "(aliases: --from / --to, -s / -t) to change languages."
         )
-        backend_choices = ("openai-realtime", "gemini-realtime")
-        backend_default = "openai-realtime"
         backend_help = "Translation backend"
 
     # usage/help の折り返し幅を 80 に固定 (ターミナル幅に依存させない)。
@@ -624,6 +628,267 @@ def _print_languages() -> None:
     print("Use the openai backend with an unsupported target → API will error.")
 
 
+# ---------------------------------------------------------------------------
+# バックエンドレジストリ (候補④)
+#
+# 以前は「引数選択肢」「_build_backend」「_emit_settings」の3箇所に args.backend の
+# 分岐が散っていた。各バックエンドを 1 つの `_BackendSpec` (可用性 / 構築 / 設定表示)
+# にまとめ、3箇所すべてをこのレジストリ駆動の dict 参照へ置き換える。
+# 新バックエンド追加 = ここに 1 エントリ + 引数グループ登録のみ。
+# ---------------------------------------------------------------------------
+
+# 各 build 関数の共通引数。argparse の Namespace と解決済みコンテキストを受け取る。
+_BuildFn = Callable[
+    [argparse.Namespace, object, str, str, bool],
+    "tuple[TranslationBackend, Summarizer | None]",
+]
+_DescribeFn = Callable[[argparse.Namespace, str, str], str]
+
+
+@dataclass(frozen=True)
+class _BackendSpec:
+    """1 バックエンドの可用性・構築・設定表示をまとめたスペック."""
+
+    available: Callable[[], bool]
+    build: _BuildFn
+    describe: _DescribeFn
+
+
+def _summary_with_model(args: argparse.Namespace, model: str) -> str:
+    """要約が有効ならモデル名付き、無効なら 'off' のラベルを返す."""
+    if args.summary_interval_seconds > 0:
+        return f"every {args.summary_interval_seconds}s ({model})"
+    return "off"
+
+
+def _max_segment_label(value: float) -> str:
+    return f"{value}s" if value > 0 else "off"
+
+
+# ---------------- build: バックエンド別構築 ----------------
+
+def _build_mlx(args, sd, src, tgt, summary_enabled):
+    if args.end_silence_ms <= 0:
+        raise SystemExit("error: --end-silence-ms must be positive")
+    if args.max_segment_seconds <= 0:
+        raise SystemExit("error: --max-segment-seconds must be positive")
+
+    # mlx 系は macOS 専用依存. ここで遅延 import (Windows では到達しない)。
+    try:
+        from realtime_interpreter.backends.mlx_local import LocalMLXBackend
+        from realtime_interpreter.summarizer import MLXSummarizer
+        from realtime_interpreter.translator import GemmaAudioTranslator
+    except ImportError as e:
+        raise SystemExit(
+            f"error: mlx backend unavailable ({e}). "
+            "The mlx backend requires macOS (Apple Silicon) with mlx-vlm installed. "
+            "On Windows use --backend openai-realtime or --backend openai-chat; "
+            "on Linux use --backend openai-realtime."
+        )
+
+    translator = GemmaAudioTranslator(
+        model=args.model,
+        source_lang=src,
+        target_lang=tgt,
+    )
+    print(f"Loading {translator.model_id} (this may take a minute)...", file=sys.stderr)
+    translator.load()
+    print("Model loaded.", file=sys.stderr)
+
+    backend = LocalMLXBackend(
+        sd_module=sd,
+        translator=translator,
+        device_name=args.device,
+        end_silence_ms=args.end_silence_ms,
+        max_segment_seconds=args.max_segment_seconds,
+    )
+    summarizer = (
+        MLXSummarizer(translator, source_lang=src, target_lang=tgt)
+        if summary_enabled
+        else None
+    )
+    return backend, summarizer
+
+
+def _build_openai_realtime(args, sd, src, tgt, summary_enabled):
+    if args.openai_debounce_ms <= 0:
+        raise SystemExit("error: --openai-debounce-ms must be positive")
+    if args.openai_max_segment_seconds < 0:
+        raise SystemExit("error: --openai-max-segment-seconds must be >= 0 (0 disables)")
+    backend = OpenAIRealtimeBackend(
+        sd_module=sd,
+        device_name=args.device,
+        api_key=args.openai_api_key,
+        model=args.openai_model,
+        turn_debounce_ms=args.openai_debounce_ms,
+        max_segment_seconds=args.openai_max_segment_seconds,
+        source_lang=src,
+        target_lang=tgt,
+    )
+    summarizer = (
+        OpenAIChatSummarizer(
+            model=args.openai_summary_model,
+            api_key=args.openai_api_key,
+            source_lang=src,
+            target_lang=tgt,
+        )
+        if summary_enabled
+        else None
+    )
+    return backend, summarizer
+
+
+def _build_gemini_realtime(args, sd, src, tgt, summary_enabled):
+    if args.gemini_debounce_ms <= 0:
+        raise SystemExit("error: --gemini-debounce-ms must be positive")
+    if args.gemini_max_segment_seconds < 0:
+        raise SystemExit("error: --gemini-max-segment-seconds must be >= 0 (0 disables)")
+
+    from realtime_interpreter.backends.gemini_realtime import GeminiRealtimeBackend
+    from realtime_interpreter.summarizer import GeminiRESTSummarizer
+
+    backend = GeminiRealtimeBackend(
+        sd_module=sd,
+        device_name=args.device,
+        api_key=args.gemini_api_key,
+        model=args.gemini_model,
+        turn_debounce_ms=args.gemini_debounce_ms,
+        max_segment_seconds=args.gemini_max_segment_seconds,
+        source_lang=src,
+        target_lang=tgt,
+    )
+    summarizer = (
+        GeminiRESTSummarizer(
+            model=args.gemini_summary_model,
+            api_key=args.gemini_api_key,
+            source_lang=src,
+            target_lang=tgt,
+        )
+        if summary_enabled
+        else None
+    )
+    return backend, summarizer
+
+
+def _build_openai_chat(args, sd, src, tgt, summary_enabled):
+    if args.end_silence_ms <= 0:
+        raise SystemExit("error: --end-silence-ms must be positive")
+    if args.max_segment_seconds <= 0:
+        raise SystemExit("error: --max-segment-seconds must be positive")
+    if args.openai_chat_timeout_seconds <= 0:
+        raise SystemExit("error: --openai-chat-timeout-seconds must be positive")
+    if args.openai_chat_max_tokens <= 0:
+        raise SystemExit("error: --openai-chat-max-tokens must be positive")
+    if args.openai_chat_temperature < 0:
+        raise SystemExit("error: --openai-chat-temperature must be >= 0")
+
+    translator = OpenAIChatAudioTranslator(
+        model=args.openai_chat_model,
+        base_url=args.openai_chat_base_url,
+        api_key=args.openai_chat_api_key,
+        timeout_seconds=args.openai_chat_timeout_seconds,
+        max_tokens=args.openai_chat_max_tokens,
+        temperature=args.openai_chat_temperature,
+        source_lang=src,
+        target_lang=tgt,
+    )
+    try:
+        backend = OpenAIChatBackend(
+            sd_module=sd,
+            device_name=args.device,
+            translator=translator,
+            end_silence_ms=args.end_silence_ms,
+            max_segment_seconds=args.max_segment_seconds,
+        )
+    except ImportError as e:
+        raise SystemExit(
+            f"error: openai-chat backend unavailable ({e}). "
+            "It requires local VAD dependencies for audio segmentation."
+        )
+    summarizer = (
+        OpenAIChatCompatibleSummarizer(
+            model=args.openai_chat_model,
+            base_url=args.openai_chat_base_url,
+            api_key=args.openai_chat_api_key,
+            timeout_seconds=args.openai_chat_timeout_seconds,
+            source_lang=src,
+            target_lang=tgt,
+        )
+        if summary_enabled
+        else None
+    )
+    return backend, summarizer
+
+
+# ---------------- describe: バックエンド別設定表示 ----------------
+
+def _describe_mlx(args, lang_label, summary_str):
+    return (
+        f"Backend: mlx | "
+        f"Lang: {lang_label} | "
+        f"VAD: end_silence={args.end_silence_ms}ms, "
+        f"max_segment={args.max_segment_seconds}s | "
+        f"summary={summary_str}"
+    )
+
+
+def _describe_openai_realtime(args, lang_label, summary_str):
+    return (
+        f"Backend: openai-realtime ({args.openai_model}) | "
+        f"Lang: {lang_label} | "
+        f"debounce={args.openai_debounce_ms}ms, "
+        f"max_segment={_max_segment_label(args.openai_max_segment_seconds)} | "
+        f"summary={_summary_with_model(args, args.openai_summary_model)}"
+    )
+
+
+def _describe_gemini_realtime(args, lang_label, summary_str):
+    return (
+        f"Backend: gemini-realtime ({args.gemini_model}) | "
+        f"Lang: {lang_label} | "
+        f"debounce={args.gemini_debounce_ms}ms, "
+        f"max_segment={_max_segment_label(args.gemini_max_segment_seconds)} | "
+        f"summary={_summary_with_model(args, args.gemini_summary_model)}"
+    )
+
+
+def _describe_openai_chat(args, lang_label, summary_str):
+    return (
+        f"Backend: openai-chat ({args.openai_chat_model}) | "
+        f"Base URL: {args.openai_chat_base_url} | "
+        f"Lang: {lang_label} | "
+        f"VAD: end_silence={args.end_silence_ms}ms, "
+        f"max_segment={args.max_segment_seconds}s | "
+        f"summary={summary_str}"
+    )
+
+
+# レジストリ。順序が --backend の選択肢 / --help の表示順を決める
+# (openai-realtime → openai-chat → mlx → gemini-realtime)。
+_BACKENDS: dict[str, _BackendSpec] = {
+    "openai-realtime": _BackendSpec(
+        available=lambda: True,
+        build=_build_openai_realtime,
+        describe=_describe_openai_realtime,
+    ),
+    "openai-chat": _BackendSpec(
+        available=lambda: _is_macos() or _is_windows(),
+        build=_build_openai_chat,
+        describe=_describe_openai_chat,
+    ),
+    "mlx": _BackendSpec(
+        available=_is_macos,
+        build=_build_mlx,
+        describe=_describe_mlx,
+    ),
+    "gemini-realtime": _BackendSpec(
+        available=lambda: True,
+        build=_build_gemini_realtime,
+        describe=_describe_gemini_realtime,
+    ),
+}
+
+
 def _build_backend(
     args: argparse.Namespace,
 ) -> tuple[
@@ -639,156 +904,10 @@ def _build_backend(
     # Windows では sd=None を渡す。各バックエンドの Windows 経路は sd を参照しない。
     sd = None if _is_windows() else _load_sounddevice()
 
-    if args.backend == "mlx":
-        if args.end_silence_ms <= 0:
-            raise SystemExit("error: --end-silence-ms must be positive")
-        if args.max_segment_seconds <= 0:
-            raise SystemExit("error: --max-segment-seconds must be positive")
-
-        # mlx 系は macOS 専用依存. ここで遅延 import (Windows では到達しない)。
-        try:
-            from realtime_interpreter.backends.mlx_local import LocalMLXBackend
-            from realtime_interpreter.summarizer import MLXSummarizer
-            from realtime_interpreter.translator import GemmaAudioTranslator
-        except ImportError as e:
-            raise SystemExit(
-                f"error: mlx backend unavailable ({e}). "
-                "The mlx backend requires macOS (Apple Silicon) with mlx-vlm installed. "
-                "On Windows use --backend openai-realtime or --backend openai-chat; "
-                "on Linux use --backend openai-realtime."
-            )
-
-        translator = GemmaAudioTranslator(
-            model=args.model,
-            source_lang=src,
-            target_lang=tgt,
-        )
-        print(f"Loading {translator.model_id} (this may take a minute)...", file=sys.stderr)
-        translator.load()
-        print("Model loaded.", file=sys.stderr)
-
-        backend = LocalMLXBackend(
-            sd_module=sd,
-            translator=translator,
-            device_name=args.device,
-            end_silence_ms=args.end_silence_ms,
-            max_segment_seconds=args.max_segment_seconds,
-        )
-        summarizer = (
-            MLXSummarizer(translator, source_lang=src, target_lang=tgt)
-            if summary_enabled
-            else None
-        )
-        return backend, summarizer
-
-    if args.backend == "openai-realtime":
-        if args.openai_debounce_ms <= 0:
-            raise SystemExit("error: --openai-debounce-ms must be positive")
-        if args.openai_max_segment_seconds < 0:
-            raise SystemExit("error: --openai-max-segment-seconds must be >= 0 (0 disables)")
-        backend = OpenAIRealtimeBackend(
-            sd_module=sd,
-            device_name=args.device,
-            api_key=args.openai_api_key,
-            model=args.openai_model,
-            turn_debounce_ms=args.openai_debounce_ms,
-            max_segment_seconds=args.openai_max_segment_seconds,
-            source_lang=src,
-            target_lang=tgt,
-        )
-        summarizer = (
-            OpenAIChatSummarizer(
-                model=args.openai_summary_model,
-                api_key=args.openai_api_key,
-                source_lang=src,
-                target_lang=tgt,
-            )
-            if summary_enabled
-            else None
-        )
-        return backend, summarizer
-
-    if args.backend == "gemini-realtime":
-        if args.gemini_debounce_ms <= 0:
-            raise SystemExit("error: --gemini-debounce-ms must be positive")
-        if args.gemini_max_segment_seconds < 0:
-            raise SystemExit("error: --gemini-max-segment-seconds must be >= 0 (0 disables)")
-
-        from realtime_interpreter.backends.gemini_realtime import GeminiRealtimeBackend
-        from realtime_interpreter.summarizer import GeminiRESTSummarizer
-
-        backend = GeminiRealtimeBackend(
-            sd_module=sd,
-            device_name=args.device,
-            api_key=args.gemini_api_key,
-            model=args.gemini_model,
-            turn_debounce_ms=args.gemini_debounce_ms,
-            max_segment_seconds=args.gemini_max_segment_seconds,
-            source_lang=src,
-            target_lang=tgt,
-        )
-        summarizer = (
-            GeminiRESTSummarizer(
-                model=args.gemini_summary_model,
-                api_key=args.gemini_api_key,
-                source_lang=src,
-                target_lang=tgt,
-            )
-            if summary_enabled
-            else None
-        )
-        return backend, summarizer
-
-    if args.backend == "openai-chat":
-        if args.end_silence_ms <= 0:
-            raise SystemExit("error: --end-silence-ms must be positive")
-        if args.max_segment_seconds <= 0:
-            raise SystemExit("error: --max-segment-seconds must be positive")
-        if args.openai_chat_timeout_seconds <= 0:
-            raise SystemExit("error: --openai-chat-timeout-seconds must be positive")
-        if args.openai_chat_max_tokens <= 0:
-            raise SystemExit("error: --openai-chat-max-tokens must be positive")
-        if args.openai_chat_temperature < 0:
-            raise SystemExit("error: --openai-chat-temperature must be >= 0")
-
-        translator = OpenAIChatAudioTranslator(
-            model=args.openai_chat_model,
-            base_url=args.openai_chat_base_url,
-            api_key=args.openai_chat_api_key,
-            timeout_seconds=args.openai_chat_timeout_seconds,
-            max_tokens=args.openai_chat_max_tokens,
-            temperature=args.openai_chat_temperature,
-            source_lang=src,
-            target_lang=tgt,
-        )
-        try:
-            backend = OpenAIChatBackend(
-                sd_module=sd,
-                device_name=args.device,
-                translator=translator,
-                end_silence_ms=args.end_silence_ms,
-                max_segment_seconds=args.max_segment_seconds,
-            )
-        except ImportError as e:
-            raise SystemExit(
-                f"error: openai-chat backend unavailable ({e}). "
-                "It requires local VAD dependencies for audio segmentation."
-            )
-        summarizer = (
-            OpenAIChatCompatibleSummarizer(
-                model=args.openai_chat_model,
-                base_url=args.openai_chat_base_url,
-                api_key=args.openai_chat_api_key,
-                timeout_seconds=args.openai_chat_timeout_seconds,
-                source_lang=src,
-                target_lang=tgt,
-            )
-            if summary_enabled
-            else None
-        )
-        return backend, summarizer
-
-    raise SystemExit(f"unknown backend: {args.backend}")
+    spec = _BACKENDS.get(args.backend)
+    if spec is None:
+        raise SystemExit(f"unknown backend: {args.backend}")
+    return spec.build(args, sd, src, tgt, summary_enabled)
 
 
 def _emit_settings(args: argparse.Namespace) -> None:
@@ -800,65 +919,11 @@ def _emit_settings(args: argparse.Namespace) -> None:
     src = normalize_language_code(args.source_lang)
     tgt = normalize_language_code(args.target_lang)
     lang_label = f"{language_name(src)} ({src}) → {language_name(tgt)} ({tgt})"
-    if args.backend == "mlx":
-        print(
-            f"Backend: mlx | "
-            f"Lang: {lang_label} | "
-            f"VAD: end_silence={args.end_silence_ms}ms, "
-            f"max_segment={args.max_segment_seconds}s | "
-            f"summary={summary_str}",
-            file=sys.stderr,
-        )
-    elif args.backend == "openai-realtime":
-        max_seg_str = (
-            f"{args.openai_max_segment_seconds}s"
-            if args.openai_max_segment_seconds > 0
-            else "off"
-        )
-        if args.summary_interval_seconds > 0:
-            summary_label = (
-                f"every {args.summary_interval_seconds}s ({args.openai_summary_model})"
-            )
-        else:
-            summary_label = "off"
-        print(
-            f"Backend: openai-realtime ({args.openai_model}) | "
-            f"Lang: {lang_label} | "
-            f"debounce={args.openai_debounce_ms}ms, "
-            f"max_segment={max_seg_str} | "
-            f"summary={summary_label}",
-            file=sys.stderr,
-        )
-    elif args.backend == "gemini-realtime":
-        if args.summary_interval_seconds > 0:
-            summary_label = (
-                f"every {args.summary_interval_seconds}s ({args.gemini_summary_model})"
-            )
-        else:
-            summary_label = "off"
-        max_seg_str = (
-            f"{args.gemini_max_segment_seconds}s"
-            if args.gemini_max_segment_seconds > 0
-            else "off"
-        )
-        print(
-            f"Backend: gemini-realtime ({args.gemini_model}) | "
-            f"Lang: {lang_label} | "
-            f"debounce={args.gemini_debounce_ms}ms, "
-            f"max_segment={max_seg_str} | "
-            f"summary={summary_label}",
-            file=sys.stderr,
-        )
-    elif args.backend == "openai-chat":
-        print(
-            f"Backend: openai-chat ({args.openai_chat_model}) | "
-            f"Base URL: {args.openai_chat_base_url} | "
-            f"Lang: {lang_label} | "
-            f"VAD: end_silence={args.end_silence_ms}ms, "
-            f"max_segment={args.max_segment_seconds}s | "
-            f"summary={summary_str}",
-            file=sys.stderr,
-        )
+
+    spec = _BACKENDS.get(args.backend)
+    if spec is None:
+        return
+    print(spec.describe(args, lang_label, summary_str), file=sys.stderr)
 
 
 def _submit_summary_task(
