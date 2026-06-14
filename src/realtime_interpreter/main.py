@@ -98,7 +98,7 @@ DEFAULT_SUMMARY_INTERVAL_SECONDS = 60
 # 長時間バックエンド (gemini/openai realtime) は再接続しながら走り続けるため、
 # 無人運用での課金暴走を防ぐ上限として設ける。
 DEFAULT_MAX_SESSION_SECONDS = 24 * 60 * 60  # 86400
-SUPPORTED_BACKENDS = ("openai-realtime", "openai-chat", "mlx", "gemini-realtime")
+SUPPORTED_BACKENDS = ("openai-realtime", "openai-chat", "gemini-realtime", "mlx")
 
 DEFAULT_GEMINI_MODEL = "models/gemini-3.5-live-translate-preview"
 # 要約は軽いテキストタスク. flash-lite は無料枠 RPD が大きく (実測 500 RPD)、
@@ -242,7 +242,7 @@ def _parse_args() -> argparse.Namespace:
             "OpenAI-compatible Chat Completions, local MLX (Gemma 4), "
             "or Gemini Multimodal Live API."
         )
-        backend_choices = ("openai-realtime", "openai-chat", "mlx", "gemini-realtime")
+        backend_choices = ("openai-realtime", "openai-chat", "gemini-realtime", "mlx")
         backend_default = "openai-realtime"
         backend_help = "Translation backend (default: openai-realtime)"
     elif _is_windows():
