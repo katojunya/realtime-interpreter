@@ -21,6 +21,12 @@ mlx-omni-server 等)でも、`input_audio` を受ける chat completions エン�
   uv run python scripts/offline_model_eval.py --models gemma4:e4b \
       --start 0 --duration 300 --cache .eval_cache.npz
 
+  # mlx-vlm を in-process 実行(Ollama 非経由)。Qwen3-Omni 等の omni 音声モデルを
+  # HuggingFace ID で評価。macOS/Apple Silicon 専用。
+  uv run python scripts/offline_model_eval.py --backend mlxvlm \
+      --models mlx-community/Qwen3-Omni-30B-A3B-Instruct-4bit \
+      --start 0 --duration 300 --cache .eval_cache.npz
+
 出力 (--out-dir, 既定 eval_out/):
   <model>.log    … [mm:ss] SRC / [mm:ss] TGT 形式 + 遅延サマリ
   summary.md     … 全モデルの遅延・出力統計の比較表
@@ -147,7 +153,7 @@ def parse_models(entries: list[str], default_base_url: str) -> list[ModelSpec]:
 
 @dataclass
 class ModelResult:
-    spec: ModelSpec
+    name: str
     latencies: list[float]
     empty_tgt: int
     errors: int
@@ -156,44 +162,36 @@ class ModelResult:
 
 
 def run_model(
-    spec: ModelSpec,
+    name: str,
+    info: str,
+    translator,
     segments: list[SpeechSegment],
-    src: str,
-    tgt: str,
     out_dir: str,
-    api_key: str | None,
-    timeout_seconds: float,
-    max_tokens: int,
-    temperature: float,
     use_repetition_guard: bool,
     audio_seconds: float,
 ) -> ModelResult:
-    translator = OpenAIChatAudioTranslator(
-        model=spec.name,
-        base_url=spec.base_url,
-        api_key=api_key,
-        timeout_seconds=timeout_seconds,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        source_lang=src,
-        target_lang=tgt,
-    )
+    """事前構築済み translator (.translate(audio)->.source/.target) で全セグメントを処理.
+
+    遅延は backend 横断で公平になるよう **harness 側で translate() 全体を計測**する
+    (音声エンコード+前処理+推論/往復を含む)。
+    """
     guard = _RepetitionGuard() if use_repetition_guard else None
 
-    log_path = os.path.join(out_dir, f"{_safe_name(spec.name)}.log")
+    log_path = os.path.join(out_dir, f"{_safe_name(name)}.log")
     latencies: list[float] = []
     empty_tgt = errors = dropped = chars = 0
     total = len(segments)
 
     with open(log_path, "w", encoding="utf-8") as f:
         f.write("# offline model eval\n")
-        f.write(f"# model: {spec.name}\n")
-        f.write(f"# base_url: {spec.base_url}\n")
+        f.write(f"# model: {name}\n")
+        f.write(f"# {info}\n")
         f.write(f"# segments: {total}  guard: {use_repetition_guard}\n\n")
         f.flush()
 
         for idx, seg in enumerate(segments, 1):
             ts = _fmt_offset(seg.start_offset_seconds)
+            t0 = time.perf_counter()
             try:
                 res = translator.translate(seg.audio)
             except Exception as e:  # noqa: BLE001
@@ -203,35 +201,37 @@ def run_model(
                 # 初回から全滅(サーバ未起動/モデル未取得)なら早期に打ち切る
                 if errors >= 3 and idx == errors:
                     f.write("# aborted: first 3 segments all errored "
-                            "(server down or model not pulled?)\n")
-                    print(f"  ! {spec.name}: 連続エラーで打ち切り", file=sys.stderr)
+                            "(server down or model not loadable?)\n")
+                    print(f"  ! {name}: 連続エラーで打ち切り", file=sys.stderr)
                     break
                 continue
+            latencies.append(time.perf_counter() - t0)
 
-            latencies.append(res.latency_seconds)
-            if guard and res.source and guard.is_repeat(res.source):
+            src_text = getattr(res, "source", "") or ""
+            tgt_text = getattr(res, "target", "") or ""
+            if guard and src_text and guard.is_repeat(src_text):
                 dropped += 1
-                f.write(f"[{ts}] <<dropped repeat: {res.source[:60]!r}>>\n\n")
+                f.write(f"[{ts}] <<dropped repeat: {src_text[:60]!r}>>\n\n")
                 f.flush()
                 continue
 
-            chars += len(res.source) + len(res.target)
-            if not res.target.strip():
+            chars += len(src_text) + len(tgt_text)
+            if not tgt_text.strip():
                 empty_tgt += 1
-            f.write(f"[{ts}] {res.source}\n")
-            f.write(f"[{ts}] {res.target}\n\n")
+            f.write(f"[{ts}] {src_text}\n")
+            f.write(f"[{ts}] {tgt_text}\n\n")
             f.flush()
 
             if idx % 25 == 0 or idx == total:
                 avg = statistics.mean(latencies) if latencies else 0.0
-                print(f"  {spec.name}: {idx}/{total}  avg latency {avg:.2f}s",
+                print(f"  {name}: {idx}/{total}  avg latency {avg:.2f}s",
                       file=sys.stderr)
 
         # 遅延サマリを末尾に追記
         f.write(_latency_block(latencies, audio_seconds))
 
     return ModelResult(
-        spec=spec,
+        name=name,
         latencies=latencies,
         empty_tgt=empty_tgt,
         errors=errors,
@@ -289,7 +289,7 @@ def write_summary(
         mx = max(lat) if lat else 0.0
         rtf = (sum(lat) / audio_seconds) if (lat and audio_seconds) else 0.0
         lines.append(
-            f"| {r.spec.name} | {ok} | {r.errors} | {r.empty_tgt} | "
+            f"| {r.name} | {ok} | {r.errors} | {r.empty_tgt} | "
             f"{r.dropped_repeats} | {mean:.2f} | {med:.2f} | {p90:.2f} | "
             f"{mx:.2f} | {rtf:.2f} | {r.total_chars} |"
         )
@@ -312,7 +312,12 @@ def main() -> None:
     ap.add_argument("--input", default=None,
                     help="音声/動画ファイル。省略時は benchmark/*.webm を自動検出")
     ap.add_argument("--models", nargs="+", required=True,
-                    help="モデル名のリスト。name または name@baseurl")
+                    help="モデル名のリスト。openai-chat では name または name@baseurl、"
+                         "mlxvlm では mlx-vlm が読める HuggingFace ID(例 "
+                         "mlx-community/Qwen3-Omni-30B-A3B-Instruct-4bit)")
+    ap.add_argument("--backend", choices=["openai-chat", "mlxvlm"], default="openai-chat",
+                    help="openai-chat: OpenAI互換HTTP(Ollama等)。"
+                         "mlxvlm: mlx-vlm を in-process で実行(Qwen3-Omni 等、macOS専用)")
     ap.add_argument("--base-url", default=DEFAULT_BASE_URL,
                     help=f"既定の OpenAI 互換エンドポイント (default: {DEFAULT_BASE_URL})")
     ap.add_argument("--api-key", default=None, help="Bearer トークン (Ollama は不要)")
@@ -377,13 +382,37 @@ def main() -> None:
 
     results: list[ModelResult] = []
     for spec in specs:
-        print(f"\n=== {spec.name}  ({spec.base_url}) ===", file=sys.stderr)
+        if args.backend == "mlxvlm":
+            # in-process mlx-vlm (macOS/Apple Silicon)。GemmaAudioTranslator は
+            # 実体が汎用 mlx-vlm 音声翻訳器で、フル HF ID をそのまま受ける。
+            from realtime_interpreter.translator import GemmaAudioTranslator
+
+            print(f"\n=== {spec.name}  (mlx-vlm in-process, loading on first segment...) ===",
+                  file=sys.stderr)
+            translator = GemmaAudioTranslator(
+                model=spec.name,
+                max_tokens=args.max_tokens,
+                temperature=args.temperature,
+                source_lang=src,
+                target_lang=tgt,
+            )
+            info = "in-process mlx-vlm"
+        else:
+            print(f"\n=== {spec.name}  ({spec.base_url}) ===", file=sys.stderr)
+            translator = OpenAIChatAudioTranslator(
+                model=spec.name,
+                base_url=spec.base_url,
+                api_key=args.api_key,
+                timeout_seconds=args.timeout_seconds,
+                max_tokens=args.max_tokens,
+                temperature=args.temperature,
+                source_lang=src,
+                target_lang=tgt,
+            )
+            info = f"base_url: {spec.base_url}"
+
         r = run_model(
-            spec, segments, src, tgt, args.out_dir,
-            api_key=args.api_key,
-            timeout_seconds=args.timeout_seconds,
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
+            spec.name, info, translator, segments, args.out_dir,
             use_repetition_guard=args.repetition_guard,
             audio_seconds=audio_seconds,
         )
