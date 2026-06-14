@@ -102,7 +102,7 @@ _SRC_LINE = re.compile(r"^\s*SRC\s*:\s*(.*)$", re.IGNORECASE)
 _TGT_LINE = re.compile(r"^\s*TGT\s*:\s*(.*)$", re.IGNORECASE)
 
 
-def _parse_src_tgt(text: str) -> tuple[str, str]:
+def parse_src_tgt(text: str) -> tuple[str, str]:
     """モデル出力から SRC: / TGT: 行を抽出する.
 
     モデルが指示形式から外れた場合のフォールバックとして:
@@ -225,7 +225,7 @@ class GemmaAudioTranslator:
         latency = time.perf_counter() - t0
 
         raw = _extract_text(result)
-        src, tgt = _parse_src_tgt(raw)
+        src, tgt = parse_src_tgt(raw)
         logger.debug("raw model output: %r", raw)
         return TranslationResult(source=src, target=tgt, latency_seconds=latency)
 

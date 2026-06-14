@@ -45,7 +45,7 @@ from realtime_interpreter.summarizer import (
     SummaryResult,
     build_summary_prompt,
 )
-from realtime_interpreter.translator import _parse_src_tgt
+from realtime_interpreter.translator import parse_src_tgt
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +230,7 @@ class OpenAIChatAudioTranslator:
         )
         latency = time.perf_counter() - t0
         raw = _extract_chat_content(response)
-        src, tgt = _parse_src_tgt(raw)
+        src, tgt = parse_src_tgt(raw)
         logger.debug("openai-chat raw output: %r", raw)
         return OpenAIChatTranslationResult(
             source=src,
