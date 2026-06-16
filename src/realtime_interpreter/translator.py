@@ -80,12 +80,20 @@ TRANSCRIBE_AND_TRANSLATE_PROMPT = (
     "TGT: <natural {target_language} translation>\n"
     "\n"
     "Rules:\n"
+    "- Transcribe ONLY actual spoken words that you can clearly hear.\n"
     "- Keep technical terms (CPU, AWS, GPU, API, etc.) in their original form where natural.\n"
-    "- Do not invent content. Translate only what is clearly audible.\n"
+    "- Do not invent, summarize, continue, or guess beyond what is audible.\n"
     "- Do not repeat words or phrases.\n"
-    "- If the audio is silent or unintelligible, output exactly:\n"
-    "  SRC:\n"
-    "  TGT:\n"
+    "- If the audio is silence, music, applause, noise, or any non-speech sound, output "
+    "empty SRC and TGT. Do NOT describe the sound.\n"
+    "- NEVER output filler or placeholder sentences such as "
+    '"I\'m going to give you an overview...", "Let me show you...", or '
+    '"I\'m going to give you a little bit of background...". '
+    "If no words are spoken, leave both lines empty.\n"
+    "\n"
+    "Example when the audio has no speech:\n"
+    "SRC:\n"
+    "TGT:\n"
 )
 
 
@@ -162,8 +170,26 @@ class GemmaAudioTranslator:
             source_language=language_name(source_lang),
             target_language=language_name(target_lang),
         )
+        # ローリング要約を「参照文脈」として翻訳プロンプトに前置きする (空なら無効)。
+        self.session_context = ""
         self._model = None
         self._processor = None
+
+    def update_context(self, summary: str) -> None:
+        """直近の累積要約を翻訳の参照文脈として設定する (main から呼ばれる)."""
+        self.session_context = summary or ""
+
+    def _prompt_with_context(self) -> str:
+        if self.session_context:
+            return (
+                f"{self._prompt}\n\n"
+                "## Background context (disambiguation only)\n"
+                "The text below summarizes earlier speech. Use it ONLY to disambiguate "
+                "terms and names you actually hear in the audio. Do NOT transcribe, "
+                "translate, repeat, or output this text. If the audio has no clear "
+                f"speech, still output empty SRC and TGT.\n{self.session_context}"
+            )
+        return self._prompt
 
     def load(self) -> None:
         """モデルとプロセッサをロード (キャッシュ済なら数秒)."""
@@ -207,7 +233,7 @@ class GemmaAudioTranslator:
         prompt = apply_chat_template(
             self._processor,
             self._model.config,
-            self._prompt,
+            self._prompt_with_context(),
             num_audios=1,
         )
 

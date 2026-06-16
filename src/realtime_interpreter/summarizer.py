@@ -71,13 +71,40 @@ def build_summary_prompt(
     duration_seconds: int,
     source_lang: str = DEFAULT_SOURCE,
     target_lang: str = DEFAULT_TARGET,
+    prev_summary: str = "",
 ) -> str:
-    """要約プロンプトを組み立てる. 言語名は ISO コードから英名へ展開."""
+    """要約プロンプトを組み立てる. 言語名は ISO コードから英名へ展開.
+
+    prev_summary を渡すと「これまでの累積要約 + 直近の新発話」から更新要約を作る
+    ローリング方式になる (transcriber と同方式)。過去要約 1 つを引き継ぐだけで、
+    その要約自体が累積のためセッション開始まで実質カバーする (プロンプトは O(1))。
+    prev_summary が空 (初回) のときは従来どおり直近窓のみを要約する。
+    """
+    src = language_name(source_lang)
+    tgt = language_name(target_lang)
+    prev = prev_summary.strip()
+    text = source_text.strip()
+    if prev:
+        return (
+            f"You are an expert at maintaining a running summary of {src} speech in {tgt}.\n"
+            f"Below is the summary so far, followed by the transcript of the latest "
+            f"{duration_seconds} seconds.\n"
+            "\n"
+            "## Output rules\n"
+            f"- Update the running summary so it reflects the whole session so far, "
+            f"incorporating the new transcript. Write it in {tgt} (3-5 sentences).\n"
+            "- Output ONLY the summary body. No prefix (e.g. 'Summary:'), no quotes, no preamble.\n"
+            "- Keep technical terms (CPU, AWS, GPU, etc.) in their original form where natural.\n"
+            "\n"
+            f"## Summary so far ({tgt})\n{prev}\n"
+            "\n"
+            f"## {src} transcript (latest {duration_seconds}s)\n{text}\n"
+        )
     return SUMMARY_PROMPT_TEMPLATE.format(
-        text=source_text.strip(),
+        text=text,
         duration=duration_seconds,
-        source_language=language_name(source_lang),
-        target_language=language_name(target_lang),
+        source_language=src,
+        target_language=tgt,
     )
 
 
@@ -104,7 +131,7 @@ class Summarizer:
         self.source_lang = source_lang
         self.target_lang = target_lang
 
-    def summarize(self, source_text: str, duration_seconds: int) -> SummaryResult:
+    def summarize(self, source_text: str, duration_seconds: int, prev_summary: str = "") -> SummaryResult:
         """過去 N 秒の source 言語テキストを target 言語要約に変換."""
         if not source_text.strip():
             return SummaryResult(text="", latency_seconds=0.0)
@@ -116,6 +143,7 @@ class Summarizer:
             source_text, duration_seconds,
             source_lang=self.source_lang,
             target_lang=self.target_lang,
+            prev_summary=prev_summary,
         )
         # num_audios=0 でテキスト専用. audio kwarg を omit して generate を呼ぶ。
         prompt = apply_chat_template(
@@ -187,7 +215,7 @@ class OpenAIChatSummarizer:
 
             self._client = OpenAI(api_key=self._api_key)
 
-    def summarize(self, source_text: str, duration_seconds: int) -> SummaryResult:
+    def summarize(self, source_text: str, duration_seconds: int, prev_summary: str = "") -> SummaryResult:
         if not source_text.strip():
             return SummaryResult(text="", latency_seconds=0.0)
 
@@ -197,6 +225,7 @@ class OpenAIChatSummarizer:
             source_text, duration_seconds,
             source_lang=self.source_lang,
             target_lang=self.target_lang,
+            prev_summary=prev_summary,
         )
 
         t0 = time.perf_counter()
@@ -262,7 +291,7 @@ class GeminiRESTSummarizer:
         self.source_lang = source_lang
         self.target_lang = target_lang
 
-    def summarize(self, source_text: str, duration_seconds: int) -> SummaryResult:
+    def summarize(self, source_text: str, duration_seconds: int, prev_summary: str = "") -> SummaryResult:
         if not source_text.strip():
             return SummaryResult(text="", latency_seconds=0.0)
         if not self.api_key:
@@ -277,6 +306,7 @@ class GeminiRESTSummarizer:
             source_text, duration_seconds,
             source_lang=self.source_lang,
             target_lang=self.target_lang,
+            prev_summary=prev_summary,
         )
 
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"

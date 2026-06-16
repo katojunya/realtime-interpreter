@@ -252,6 +252,24 @@ class OpenAIChatAudioTranslator:
             source_language=language_name(source_lang),
             target_language=language_name(target_lang),
         )
+        # ローリング要約を「参照文脈」として翻訳プロンプトに前置きする (空なら無効)。
+        self.session_context = ""
+
+    def update_context(self, summary: str) -> None:
+        """直近の累積要約を翻訳の参照文脈として設定する (main から呼ばれる)."""
+        self.session_context = summary or ""
+
+    def _prompt_with_context(self) -> str:
+        if self.session_context:
+            return (
+                f"{self._prompt}\n\n"
+                "## Background context (disambiguation only)\n"
+                "The text below summarizes earlier speech. Use it ONLY to disambiguate "
+                "terms and names you actually hear in the audio. Do NOT transcribe, "
+                "translate, repeat, or output this text. If the audio has no clear "
+                f"speech, still output empty SRC and TGT.\n{self.session_context}"
+            )
+        return self._prompt
 
     def translate(self, audio: np.ndarray) -> OpenAIChatTranslationResult:
         wav_b64 = _encode_wav_base64(audio)
@@ -261,7 +279,7 @@ class OpenAIChatAudioTranslator:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": self._prompt},
+                        {"type": "text", "text": self._prompt_with_context()},
                         {
                             "type": "input_audio",
                             "input_audio": {
@@ -341,6 +359,10 @@ class OpenAIChatBackend:
     ) -> None:
         self._capture.__exit__(exc_type, exc_val, exc_tb)
 
+    def update_context(self, summary: str) -> None:
+        """ローリング要約を翻訳の参照文脈として translator へ供給する (main から呼ばれる)."""
+        self.translator.update_context(summary)
+
     def stream_segments(self) -> Iterator[TranslatedSegment]:
         for segment in self._capture.segments():
             try:
@@ -387,7 +409,7 @@ class OpenAIChatCompatibleSummarizer:
         self.source_lang = source_lang
         self.target_lang = target_lang
 
-    def summarize(self, source_text: str, duration_seconds: int) -> SummaryResult:
+    def summarize(self, source_text: str, duration_seconds: int, prev_summary: str = "") -> SummaryResult:
         if not source_text.strip():
             return SummaryResult(text="", latency_seconds=0.0)
 
@@ -396,6 +418,7 @@ class OpenAIChatCompatibleSummarizer:
             duration_seconds,
             source_lang=self.source_lang,
             target_lang=self.target_lang,
+            prev_summary=prev_summary,
         )
         payload = {
             "model": self.model,

@@ -49,6 +49,10 @@ class LocalMLXBackend:
     ) -> None:
         self._capture.__exit__(exc_type, exc_val, exc_tb)
 
+    def update_context(self, summary: str) -> None:
+        """ローリング要約を翻訳の参照文脈として translator へ供給する (main から呼ばれる)."""
+        self.translator.update_context(summary)
+
     def stream_segments(self) -> Iterator[TranslatedSegment]:
         for segment in self._capture.segments():
             try:

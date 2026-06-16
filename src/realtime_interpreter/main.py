@@ -23,6 +23,7 @@ import argparse
 import logging
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -860,6 +861,41 @@ def _emit_settings(args: argparse.Namespace) -> None:
         )
 
 
+class _SummaryState:
+    """直近の累積要約をスレッドセーフに保持するホルダー.
+
+    要約ワーカー (max_workers=1 でシリアル) が完了時に書き込み、次回ワーカーが
+    開始時に読み出してローリング要約 (prev_summary) として引き継ぐ。
+    """
+
+    def __init__(self) -> None:
+        self._text = ""
+        self._lock = threading.Lock()
+
+    def get(self) -> str:
+        with self._lock:
+            return self._text
+
+    def set(self, text: str) -> None:
+        with self._lock:
+            self._text = text
+
+
+def _apply_translation_context(backend: TranslationBackend, summary: str) -> None:
+    """要約をリアルタイム翻訳の文脈として backend へ渡す (対応 backend のみ).
+
+    openai-chat / mlx は `update_context` を実装しており、次以降の翻訳プロンプトに
+    「参照文脈」として要約を前置きする。openai-realtime / gemini-realtime は
+    実装しない (要約のローリングのみ対象)。
+    """
+    update = getattr(backend, "update_context", None)
+    if callable(update):
+        try:
+            update(summary)
+        except Exception:
+            logger.exception("update_context failed")
+
+
 def _submit_summary_task(
     executor: ThreadPoolExecutor,
     summarizer: Summarizer | OpenAIChatSummarizer | OpenAIChatCompatibleSummarizer,
@@ -869,12 +905,17 @@ def _submit_summary_task(
     duration_seconds: int,
     session_logger: SessionLogger,
     renderer: StreamingRenderer,
+    summary_state: _SummaryState,
+    backend: TranslationBackend,
 ) -> None:
     """要約タスクをバックグラウンド executor に投げる.
 
     Submit 後すぐに return するためメインループ (翻訳パイプライン) はブロックしない.
     ワーカー側で完了時に renderer / session_logger に直接書き込む.
     Rich Live は内部ロックで thread-safe なので別スレッドからの emit_summary は問題ない。
+
+    ローリング要約: ワーカー開始時に `summary_state` から前回の累積要約を読み、
+    `prev_summary` として渡す。生成後は state を更新し、対応 backend には翻訳文脈として供給する。
     """
     items = [text for ts, text in source_buffer if ts >= since_offset]
     if not items:
@@ -882,14 +923,19 @@ def _submit_summary_task(
     src_concat = " ".join(items)
 
     def _worker() -> None:
+        prev_summary = summary_state.get()
         try:
-            summary = summarizer.summarize(src_concat, duration_seconds)
+            summary = summarizer.summarize(
+                src_concat, duration_seconds, prev_summary=prev_summary
+            )
         except Exception:
             logger.exception("summary task failed")
             return
         if not summary.text:
             # summarizer 側で原因 (空応答 / max_completion_tokens 不足 等) を WARN ログ済み
             return
+        summary_state.set(summary.text)
+        _apply_translation_context(backend, summary.text)
         ts = format_offset(until_offset)
         renderer.emit_summary(ts, summary.text)
         session_logger.log_summary(ts, summary.text)
@@ -962,6 +1008,8 @@ def main() -> None:
     source_buffer: list[tuple[float, str]] = []
     summary_last_offset = 0.0
     summary_interval = float(args.summary_interval_seconds)
+    # ローリング要約 + 翻訳文脈注入のための共有状態 (直近の累積要約)
+    summary_state = _SummaryState()
 
     # 要約はメインループから切り離して別スレッドで実行 (1〜3秒 API 待ちで翻訳が止まらないように)。
     # max_workers=1: 同時に複数の要約が走らないようにシリアル化 (連続発火しても順次処理).
@@ -1025,6 +1073,8 @@ def main() -> None:
                         int(summary_interval),
                         session_logger,
                         renderer,
+                        summary_state,
+                        backend,
                     )
                     summary_last_offset = segment_end
                     cutoff = segment_end - summary_interval * 2
