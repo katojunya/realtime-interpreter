@@ -38,7 +38,7 @@ WASAPI loopback (Windows) / BlackHole 2ch (macOS)
   → 受信ごとに Rich Live が in-place で「進行中」行を更新表示
   → delta が一定時間 (デフォルト 800ms) 来なくなったら debounce で発話確定 (or 最大 8s で強制カット)
   → 確定行を append-only に永続表示 + ログ
-  → [60秒ごと] OpenAI Chat Completions (デフォルト gpt-5-mini) で過去 60 秒を要約
+  → [60秒ごと] OpenAI Chat Completions (デフォルト gpt-5.4-mini) で過去 60 秒を要約
 ```
 
 **確定ロジック (alignment-first)**: この API には `*.completed` イベントが無いため、**delta が一定時間 (デフォルト 800ms) 来なくなった時点で発話を確定**します。連続発話では `--openai-rt-max-segment-seconds` (デフォルト 8s) で強制カットします。文単位 (JA `。` / EN `.`) の即時 commit も試したが、本モデルは EN 1 文を JA 複数文に訳すことがあり対応がズレるため、debounce ベースに統一しています。
@@ -158,7 +158,7 @@ uv run realtime-interpreter \
 | `--openai-rt-model` | Realtime モデル ID | `gpt-realtime-translate` | openai-realtime |
 | `--openai-rt-debounce-ms` | 発話の切れ目検出 (debounce) | `800` | openai-realtime |
 | `--openai-rt-max-segment-seconds` | 連続発話の強制カット上限. `0` で無効 | `8.0` | openai-realtime |
-| `--openai-rt-summary-model` | 要約モデル (Chat Completions) | `gpt-5-mini` | openai-realtime |
+| `--openai-rt-summary-model` | 要約モデル (Chat Completions) | `gpt-5.4-mini` | openai-realtime |
 | `--openai-rt-api-key` | API キー (デフォルト `OPENAI_API_KEY`) | — | openai-realtime |
 | `--gemini-rt-model` | Gemini Live モデル ID | `models/gemini-3.5-live-translate-preview` | gemini-realtime |
 | `--gemini-rt-debounce-ms` | 発話の切れ目検出 (debounce) | `800` | gemini-realtime |
@@ -227,7 +227,7 @@ uv run realtime-interpreter --backend mlx --list-models # プリセット一覧
 
 デフォルトで 60 秒ごとに、過去 60 秒間の **source 言語の文字起こし** を target 言語で要約して表示します。要約経路はバックエンドごとに異なります:
 
-- **openai-realtime**: OpenAI Chat Completions (`gpt-5-mini`)。ライブ翻訳と同じ `OPENAI_API_KEY` で動作
+- **openai-realtime**: OpenAI Chat Completions (`gpt-5.4-mini`)。ライブ翻訳と同じ `OPENAI_API_KEY` で動作
 - **gemini-realtime**: `gemini-3.1-flash-lite`, APIキーもライブ翻訳と同じ
 - **openai-chat**: 同じ OpenAI 互換 REST API
 - **mlx**: ライブ翻訳と同じ Gemma 4 をテキスト専用モードで再利用
@@ -291,8 +291,8 @@ uv run pytest
 |---|---|---|
 | `gpt-realtime-translate` (翻訳) | $0.034/分 | 約 $2.04 |
 | `gpt-realtime-whisper` (文字起こし) | $0.017/分 | 約 $1.02 |
-| `gpt-5-mini` (要約, 60s ごと) | 約 $0.0003/回 | 約 $0.02 |
-| **合計** | | **約 $3.08 / 時** (1 営業日 8h ≈ $25) |
+| `gpt-5.4-mini` (要約, 60s ごと) | 約 $0.0008/回 | 約 $0.05 |
+| **合計** | | **約 $3.11 / 時** (1 営業日 8h ≈ $25) |
 
 詳細は [OpenAI Realtime 料金ページ](https://developers.openai.com/api/docs/models/gpt-realtime-translate)。
 

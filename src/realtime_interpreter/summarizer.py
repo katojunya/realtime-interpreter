@@ -4,7 +4,7 @@
 
 - `Summarizer` (ローカル): 翻訳と同じ Gemma 4 モデルをテキスト専用モードで再利用.
   MLX バックエンド利用時に翻訳モデルを共有する想定. 追加 RAM 不要.
-- `OpenAIChatSummarizer` (クラウド): OpenAI Chat Completions API で gpt-5-mini 等を呼ぶ.
+- `OpenAIChatSummarizer` (クラウド): OpenAI Chat Completions API で gpt-5.4-mini 等を呼ぶ.
   OpenAI バックエンドと同じ API キーで使える. Realtime API とは別経路.
 
 どちらも同じ `summarize(source_text, duration_seconds) -> SummaryResult` インターフェース。
@@ -27,11 +27,12 @@ SUMMARY_MAX_TOKENS = 256
 SUMMARY_TEMPERATURE = 0.3
 SUMMARY_TOP_P = 0.9
 
-# OpenAI Chat Completions 用の既定モデル.
-# - gpt-5-mini: 品質/コスト/レイテンシのバランスが良い. ~$0.02-0.05/h 想定 (60s ごとに要約)
-# - gpt-4o-mini: より安価. ~$0.018/h
-# - gpt-5: 過剰品質 (要約に reasoning モデル相当はオーバーキル)
-DEFAULT_OPENAI_SUMMARY_MODEL = "gpt-5-mini"
+# OpenAI Chat Completions 用のデフォルトモデル.
+# - gpt-5.4-mini: gpt-5-mini の公式後継 (gpt-5-mini は 2026-12-11 シャットダウン)。
+#   約 2 倍高速で品質も上。要約コストは本用途で ~$0.05/h 程度 (60s ごとに要約)。
+# - gpt-5.4-nano: より安価・高速だが gpt-5-nano の後継 (1 ティア下) で生成要約は不得手。
+# - gpt-5.5: 過剰品質 (要約に reasoning モデル相当はオーバーキル)
+DEFAULT_OPENAI_SUMMARY_MODEL = "gpt-5.4-mini"
 # 出力上限. gpt-5 系は reasoning モデルで内部 thinking に大量のトークンを使うため、
 # 余裕を持たせて 2048. 通常の要約 (300 トークン程度) + thinking (1000+) を許容する。
 # 注: max_completion_tokens は thinking + 出力の合計に対する上限なので、小さすぎると
