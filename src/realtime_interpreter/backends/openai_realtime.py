@@ -513,6 +513,9 @@ class OpenAIRealtimeBackend:
                 mono = _to_mono(arr)
                 mono = _resample_linear(mono, self._capture_rate, OPENAI_SAMPLE_RATE)
                 if mono.size:
+                    # 表示用レベルメーター更新 (mac の _audio_callback と同様)。
+                    # これが無いと Windows loopback で常に -inf dB になる。
+                    self._current_level_db = _compute_dbfs(mono)
                     self._audio_queue.put(mono)
             except Exception:
                 logger.exception("loopback callback failed")
