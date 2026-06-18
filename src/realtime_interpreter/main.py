@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -116,6 +117,32 @@ def _is_windows() -> bool:
 
 def _is_macos() -> bool:
     return sys.platform == "darwin"
+
+
+def _env_truthy(name: str) -> bool:
+    """環境変数が truthy (1/true/yes/on) かを判定する."""
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _enable_system_certs() -> None:
+    """ランタイムの TLS 検証を OS の証明書ストアに切り替える (--system-certs).
+
+    truststore を ssl モジュールへ inject することで、stdlib ssl を使う urllib /
+    websocket-client と、httpx を使う openai SDK のすべてが OS ストア (Windows 証明書
+    ストア / macOS キーチェーン / Linux システムCA) でルート CA を検証するようになる。
+    他の TLS 利用より前 (起動直後) に呼ぶこと。truststore 未導入時は警告のみで継続する。
+    """
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+        logger.info("system certificate store enabled (truststore.inject_into_ssl)")
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"warning: --system-certs requested but could not enable OS trust store "
+            f"({e}). Falling back to bundled CAs. Install with `uv sync`.",
+            file=sys.stderr,
+        )
 
 
 def _list_devices() -> None:
@@ -591,6 +618,18 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Verbose logging to stderr",
     )
+    # OS の証明書ストアで TLS を検証する (企業 TLS インターセプト対応)。uv の --system-certs
+    # と同形式の opt-in。env REALTIME_INTERPRETER_SYSTEM_CERTS が truthy なら既定 on。
+    parser.add_argument(
+        "--system-certs",
+        action="store_true",
+        default=_env_truthy("REALTIME_INTERPRETER_SYSTEM_CERTS"),
+        help=(
+            "Verify TLS using the OS certificate store (Windows store / macOS Keychain "
+            "/ Linux system CAs) instead of the bundled CAs. Needed behind corporate TLS "
+            "interception. Env: REALTIME_INTERPRETER_SYSTEM_CERTS=1."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -977,6 +1016,10 @@ def main() -> None:
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         )
 
+    # OS 証明書ストア検証は、いずれの TLS 利用 (バックエンド構築・ネットワーク) よりも前に有効化する。
+    if args.system_certs:
+        _enable_system_certs()
+
     if args.summary_interval_seconds < 0:
         print("error: --summary-interval-seconds must be >= 0", file=sys.stderr)
         sys.exit(2)
@@ -1002,6 +1045,8 @@ def main() -> None:
     session_logger = SessionLogger(log_dir=log_dir, timestamp=timestamp)
     print(f"Log: {session_logger.path}", file=sys.stderr)
     _emit_settings(args)
+    if args.system_certs:
+        print("TLS: OS certificate store (truststore)", file=sys.stderr)
     print("", file=sys.stderr)
 
     # 要約用バッファ: 過去 N 秒の source 言語転写を (offset, text) で保持

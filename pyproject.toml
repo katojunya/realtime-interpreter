@@ -17,6 +17,10 @@ dependencies = [
     "rich>=13.7",
     "websocket-client>=1.8",
     "openai>=1.40",
+    # OS 証明書ストア検証 (--system-certs). 企業 TLS インターセプト環境で、ランタイムの
+    # HTTPS/WSS を OS ストア (Windows 証明書ストア / macOS キーチェーン / Linux システムCA)
+    # で検証するために使う。ctypes ベースで追加ビルド不要 (全OS)。
+    "truststore>=0.10",
     # --- Windows only: WASAPI loopback capture (sounddevice has no loopback support) ---
     "pyaudiowpatch>=0.2.12; sys_platform == 'win32'",
     # --- local VAD backends (mlx / openai-chat) ---

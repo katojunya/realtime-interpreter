@@ -155,6 +155,7 @@ uv run realtime-interpreter \
 | `--max-session-seconds` | この秒数で自動停止 (コスト安全弁). `0` で無制限 | `86400` (24h) | 共通 |
 | `--log-dir` | セッションログの出力先 | `logs/` | 共通 |
 | `--debug` | 詳細ログを stderr に出す | (off) | 共通 |
+| `--system-certs` | TLS 検証を OS 証明書ストアで行う(企業プロキシ対応)。env `REALTIME_INTERPRETER_SYSTEM_CERTS=1` | (off) | 共通 |
 | `--openai-rt-model` | Realtime モデル ID | `gpt-realtime-translate` | openai-realtime |
 | `--openai-rt-debounce-ms` | 発話の切れ目検出 (debounce) | `800` | openai-realtime |
 | `--openai-rt-max-segment-seconds` | 連続発話の強制カット上限. `0` で無効 | `8.0` | openai-realtime |
@@ -183,6 +184,7 @@ uv run realtime-interpreter \
 - `GEMINI_API_KEY`: `gemini-realtime` 必須
 - `OPENAI_CHAT_API_KEY`: `openai-chat` の Bearer token (Ollama では不要)
 - `REALTIME_INTERPRETER_MODEL`: mlx デフォルトモデルの上書き
+- `REALTIME_INTERPRETER_SYSTEM_CERTS`: truthy で `--system-certs` を既定 on にする
 
 ### 言語の切り替え
 
@@ -312,6 +314,27 @@ uv run pytest
 ### openai-chat / mlx
 
 ローカル実行のため**無料** (電力消費のみ)。
+
+## 企業プロキシ / TLS インターセプト環境
+
+社内プロキシが TLS を傍受し独自ルート CA で再署名する環境では、クラウドバックエンド
+(openai-realtime / gemini-realtime / OpenAI Web の openai-chat) への HTTPS/WSS 接続が
+`CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate` で失敗します。Python は
+同梱 CA (certifi) で検証するため、OS の証明書ストアに導入済みの社内 CA を知らないためです。
+
+**`--system-certs` を付けると、TLS 検証を OS の証明書ストア**(Windows 証明書ストア /
+macOS キーチェーン / Linux システム CA)で行うようになり、社内 CA を信頼して接続できます。
+
+```bash
+uv run realtime-interpreter --backend openai-realtime --system-certs
+# 環境変数でも有効化可: REALTIME_INTERPRETER_SYSTEM_CERTS=1
+```
+
+- ⚠ **インストール自体がプロキシ下で失敗する場合**:`uv` 自身も既定では同梱 CA を使うため、
+  `uv sync --system-certs`(または `UV_SYSTEM_CERTS=true`)が必要です(`uv --system-certs` は
+  uv の DL にのみ効き、アプリ実行時の TLS には効きません。実行時は本ツールの `--system-certs` を使用)。
+- 代替として、社内 CA を含む PEM を `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` で指定する方法もあります。
+- ローカル `openai-chat`(Ollama, `http://localhost`)は TLS 非経由のため本オプションは不要です。
 
 ## 既知の制限事項
 
