@@ -108,20 +108,19 @@ def format_status(
     current_duration: float = 0.0,
     max_duration: float = 0.0,
 ) -> Text:
+    """音声入力レベルの簡素表示 (ステータス行の「左」スロット用).
+
+    `[meter] dB` を返し、発話区間中 (in_segment) のみ ` (cur/max)` を付与する。
+    バックエンド名や状態 (Capturing/Listening 等) は通信ステータス側 (右スロット)
+    で表現するため、ここには含めない。`backend_name` は呼び出し互換のため残置。
+    """
     meter = build_level_meter(db)
     db_str = f"{db:+.1f}dB" if db > -90.0 else "-inf dB"
 
+    text = Text(f"[{meter}] ", style="green")
+    text.append(db_str, style="yellow")
     if in_segment:
-        text = Text("● ", style="red bold")
-        text.append(f"Capturing ({backend_name}) ", style="bold")
-        text.append(f"[{meter}] ", style="green")
-        text.append(f"{db_str} ", style="yellow")
-        text.append(f"({current_duration:.1f}s / {max_duration:.1f}s)", style="dim")
-    else:
-        text = Text("● ", style="green bold")
-        text.append(f"Listening ({backend_name}) ", style="bold")
-        text.append(f"[{meter}] ", style="green")
-        text.append(f"{db_str}", style="yellow")
+        text.append(f" ({current_duration:.1f}s / {max_duration:.1f}s)", style="dim")
     return text
 
 

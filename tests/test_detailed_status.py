@@ -48,7 +48,8 @@ def test_compute_dbfs() -> None:
 
 
 def test_format_status_text() -> None:
-    # Test Listening status formatting
+    # format_status は「左スロット」= 音声入力レベルのみ (簡素化)。
+    # バックエンド名や Listening/Capturing の語は含めない (通信ステータス側で表現)。
     listening_text = format_status(
         backend_name="Test Backend",
         in_segment=False,
@@ -56,10 +57,14 @@ def test_format_status_text() -> None:
     )
     assert isinstance(listening_text, Text)
     raw_listening = listening_text.plain
-    assert "Listening (Test Backend)" in raw_listening
+    assert "Test Backend" not in raw_listening
+    assert "Listening" not in raw_listening
     assert "-30.0dB" in raw_listening
+    assert "[" in raw_listening and "]" in raw_listening  # メーター
+    # 非発話時は (cur/max) を出さない
+    assert "/" not in raw_listening
 
-    # Test Speaking/Capturing status formatting
+    # 発話区間中は (cur/max) を付与
     speaking_text = format_status(
         backend_name="Test Backend",
         in_segment=True,
@@ -67,11 +72,30 @@ def test_format_status_text() -> None:
         current_duration=2.5,
         max_duration=8.0,
     )
-    assert isinstance(speaking_text, Text)
     raw_speaking = speaking_text.plain
-    assert "Capturing (Test Backend)" in raw_speaking
+    assert "Capturing" not in raw_speaking
     assert "-15.0dB" in raw_speaking
     assert "2.5s / 8.0s" in raw_speaking
+
+
+def test_renderer_status_composition() -> None:
+    """左(音声) | 右(通信) の 1 行合成. 片方のみなら区切りなし."""
+    from realtime_interpreter.renderer import StreamingRenderer
+
+    r = StreamingRenderer()
+    assert r._compose_status() is None  # 両方空 → 行なし
+
+    r._audio_status = "[■■□□□□□□□□] -20.0dB"
+    assert r._compose_status().plain == "[■■□□□□□□□□] -20.0dB"  # 左のみ
+
+    r._comm_status = Text("● Listening (X)...")
+    combined = r._compose_status().plain
+    assert "[■■□□□□□□□□] -20.0dB" in combined
+    assert "|" in combined
+    assert "Listening (X)" in combined
+
+    r._audio_status = ""
+    assert r._compose_status().plain == "● Listening (X)..."  # 右のみ
 
 
 class DummyStream:
@@ -100,10 +124,11 @@ def test_backends_implement_status_callbacks() -> None:
         max_segment_seconds=8.0,
     )
     assert isinstance(backend_mlx, TranslationBackend)
-    statuses_mlx = []
-    backend_mlx.set_status_callback(statuses_mlx.append)
-    assert backend_mlx.status_callback == statuses_mlx.append
-    assert backend_mlx._capture.status_callback == statuses_mlx.append
+    audio_mlx, comm_mlx = [], []
+    backend_mlx.set_status_callback(audio_mlx.append, comm_mlx.append)
+    # capture(メーター)は audio_cb、通信ステータスは comm_cb に振り分け
+    assert backend_mlx._capture.status_callback == audio_mlx.append
+    assert backend_mlx._comm_cb == comm_mlx.append
 
     # OpenAI Chat
     translator_chat = OpenAIChatAudioTranslator(api_key="dummy")
@@ -113,10 +138,10 @@ def test_backends_implement_status_callbacks() -> None:
         translator=translator_chat,
     )
     assert isinstance(backend_chat, TranslationBackend)
-    statuses_chat = []
-    backend_chat.set_status_callback(statuses_chat.append)
-    assert backend_chat.status_callback == statuses_chat.append
-    assert backend_chat._capture.status_callback == statuses_chat.append
+    audio_chat, comm_chat = [], []
+    backend_chat.set_status_callback(audio_chat.append, comm_chat.append)
+    assert backend_chat._capture.status_callback == audio_chat.append
+    assert backend_chat._comm_cb == comm_chat.append
 
     # OpenAI Realtime
     backend_ort = OpenAIRealtimeBackend(
@@ -125,9 +150,10 @@ def test_backends_implement_status_callbacks() -> None:
         api_key="dummy",
     )
     assert isinstance(backend_ort, TranslationBackend)
-    statuses_ort = []
-    backend_ort.set_status_callback(statuses_ort.append)
-    assert backend_ort.status_callback == statuses_ort.append
+    audio_ort, comm_ort = [], []
+    backend_ort.set_status_callback(audio_ort.append, comm_ort.append)
+    assert backend_ort._audio_cb == audio_ort.append
+    assert backend_ort._comm_cb == comm_ort.append
 
     # Gemini Realtime
     backend_gemini = GeminiRealtimeBackend(
@@ -136,6 +162,7 @@ def test_backends_implement_status_callbacks() -> None:
         api_key="dummy",
     )
     assert isinstance(backend_gemini, TranslationBackend)
-    statuses_gemini = []
-    backend_gemini.set_status_callback(statuses_gemini.append)
-    assert backend_gemini.status_callback == statuses_gemini.append
+    audio_gem, comm_gem = [], []
+    backend_gemini.set_status_callback(audio_gem.append, comm_gem.append)
+    assert backend_gemini._audio_cb == audio_gem.append
+    assert backend_gemini._comm_cb == comm_gem.append

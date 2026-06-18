@@ -10,6 +10,8 @@ Rich Live を使い、進行中のセグメント (英語 + 日本語の 2 行) 
 
 from __future__ import annotations
 
+import threading
+
 from rich.cells import cell_len
 from rich.console import Console, Group
 from rich.live import Live
@@ -122,8 +124,15 @@ class StreamingRenderer:
         self._current_ts: str | None = None
         self._current_source: str = ""
         self._current_target: str = ""
-        self._status: str = ""
+        # ステータス行は「左=音声入力レベル(簡素) | 右=LLM通信ステータス」の2スロット。
+        # capture スレッドが audio を、backend スレッドが comm を更新する。
+        self._audio_status: str | Text = ""
+        self._comm_status: str | Text = ""
         self._live: Live | None = None
+        # ステータス(背景スレッド)と partial/commit(メインスレッド)が同時に
+        # Live を更新するため、Live への書き込み・console.print を直列化する。
+        # 直列化しないと Rich Live の行追跡が壊れ、partial が重複描画される。
+        self._lock = threading.RLock()
 
     def __enter__(self) -> "StreamingRenderer":
         self._live = Live(
@@ -163,23 +172,44 @@ class StreamingRenderer:
                         body_style="italic", max_width=max_width,
                     )
                 )
-        if self._status:
-            if isinstance(self._status, Text):
-                items.append(self._status)
-            else:
-                items.append(Text(self._status, style="yellow"))
+        status_line = self._compose_status()
+        if status_line is not None:
+            items.append(status_line)
         return Group(*items)
 
+    def _compose_status(self) -> Text | None:
+        """左(音声) | 右(通信) を 1 行に合成. 片方のみなら区切りなし."""
+        def _as_text(v: str | Text, default_style: str) -> Text | None:
+            if isinstance(v, Text):
+                return v if len(v) else None
+            return Text(v, style=default_style) if v else None
+
+        left = _as_text(self._audio_status, "green")
+        right = _as_text(self._comm_status, "yellow")
+        if left is None and right is None:
+            return None
+        if left is None:
+            return right
+        if right is None:
+            return left
+        line = Text()
+        line.append_text(left)
+        line.append(" | ", style="dim")
+        line.append_text(right)
+        return line
+
     def _refresh(self) -> None:
-        if self._live is not None:
-            self._live.update(self._render())
+        with self._lock:
+            if self._live is not None:
+                self._live.update(self._render())
 
     def update_current(self, ts: str, source: str, target: str) -> None:
         """進行中セグメントの状態を上書き (delta 受信ごとに呼ぶ)."""
-        self._current_ts = ts
-        self._current_source = source
-        self._current_target = target
-        self._refresh()
+        with self._lock:
+            self._current_ts = ts
+            self._current_source = source
+            self._current_target = target
+            self._refresh()
 
     def commit(self, ts: str, source: str, target: str) -> None:
         """ターン確定: 永続表示エリアに昇格させ、進行中をクリア.
@@ -196,24 +226,25 @@ class StreamingRenderer:
         """
         src = source.strip()
         tgt = target.strip()
-        if src:
-            # [mm:ss]=緑 / source 転写=グレー の append-only 出力
-            self._console.print(
-                _timestamped_line(ts, src, body_style="dim"),
-                soft_wrap=True,
-            )
-        if tgt:
-            # [mm:ss]=緑 / target 訳=通常色
-            self._console.print(
-                _timestamped_line(ts, tgt, body_style=""),
-                soft_wrap=True,
-            )
-        if src or tgt:
-            self._console.print("")
-        self._current_ts = None
-        self._current_source = ""
-        self._current_target = ""
-        self._refresh()
+        with self._lock:
+            if src:
+                # [mm:ss]=緑 / source 転写=グレー の append-only 出力
+                self._console.print(
+                    _timestamped_line(ts, src, body_style="dim"),
+                    soft_wrap=True,
+                )
+            if tgt:
+                # [mm:ss]=緑 / target 訳=通常色
+                self._console.print(
+                    _timestamped_line(ts, tgt, body_style=""),
+                    soft_wrap=True,
+                )
+            if src or tgt:
+                self._console.print("")
+            self._current_ts = None
+            self._current_source = ""
+            self._current_target = ""
+            self._refresh()
 
     def emit_summary(self, ts: str, text: str) -> None:
         """要約ブロックを永続表示エリアに出す (要約は in-progress 表示しない).
@@ -224,16 +255,31 @@ class StreamingRenderer:
         text = text.strip()
         if not text:
             return
-        self._console.print(Text(f"--- 要約 [{ts}] ---", style="cyan"), soft_wrap=True)
-        self._console.print(Text(text), soft_wrap=True)
-        self._console.print(Text("---", style="cyan"), soft_wrap=True)
-        self._console.print("")
-        self._refresh()
+        with self._lock:
+            self._console.print(Text(f"--- 要約 [{ts}] ---", style="cyan"), soft_wrap=True)
+            self._console.print(Text(text), soft_wrap=True)
+            self._console.print(Text("---", style="cyan"), soft_wrap=True)
+            self._console.print("")
+            self._refresh()
+
+    def update_audio_status(self, text: str | Text) -> None:
+        """左スロット (音声入力レベル) を更新する (capture スレッドから呼ばれる)."""
+        with self._lock:
+            self._audio_status = text
+            self._refresh()
+
+    def update_comm_status(self, text: str | Text) -> None:
+        """右スロット (LLM 通信ステータス) を更新する (backend から呼ばれる)."""
+        with self._lock:
+            self._comm_status = text
+            self._refresh()
 
     def update_status(self, text: str | Text) -> None:
-        self._status = text
-        self._refresh()
+        """後方互換: 通信ステータス (右スロット) を更新する."""
+        self.update_comm_status(text)
 
     def clear_status(self) -> None:
-        self._status = ""
-        self._refresh()
+        with self._lock:
+            self._audio_status = ""
+            self._comm_status = ""
+            self._refresh()

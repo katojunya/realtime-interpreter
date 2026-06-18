@@ -281,8 +281,12 @@ class OpenAIRealtimeBackend:
         self._level_samples: int = 0
         self._level_last_log_at: float = 0.0
 
-        # ステータス表示状態
-        self.status_callback: Callable[[str | Text], None] | None = None
+        # ステータス表示状態 (audio=左メーター / comm=右通信ステータス)
+        self._audio_cb: Callable[[object], None] | None = None
+        self._comm_cb: Callable[[object], None] | None = None
+        # メーター更新の間引き (send_loop はチャンク毎に呼ぶため). 状態変化時は即時。
+        self._last_status_at: float = 0.0
+        self._last_status_key: object = None
         self._state: BackendState = BackendState.CONNECTING
         self._speaking: bool = False
         self._speaking_start_time: float = 0.0
@@ -304,47 +308,59 @@ class OpenAIRealtimeBackend:
 
         self._capture_start_monotonic: float | None = None
 
-    def set_status_callback(self, callback: Callable[[str | Text], None]) -> None:
-        self.status_callback = callback
+    def set_status_callback(
+        self,
+        audio_cb: Callable[[object], None],
+        comm_cb: Callable[[object], None],
+    ) -> None:
+        self._audio_cb = audio_cb
+        self._comm_cb = comm_cb
+
+    def _comm_status_text(self) -> Text:
+        """右スロット用の通信ステータス文言."""
+        if self._reconnecting.is_set():
+            return Text("⚠ ", style="yellow bold").append(
+                "Reconnecting to OpenAI Realtime...", style="bold"
+            )
+        if self._state == BackendState.CONNECTING:
+            return Text("● ", style="yellow bold").append(
+                f"Connecting to OpenAI Realtime ({self._model})...", style="bold"
+            )
+        if self._state == BackendState.TRANSLATING:
+            return Text("● ", style="cyan bold").append(
+                "Receiving Response (OpenAI Realtime)...", style="bold"
+            )
+        return Text("● ", style="green bold").append(
+            "Listening (OpenAI Realtime)...", style="bold"
+        )
 
     def _update_status_display(self) -> None:
-        if not self.status_callback:
+        # send_loop はチャンク毎に呼ぶので、メーターの高頻度更新は 0.1s に間引く。
+        # ただし状態(再接続/接続/受信/発話)が変わったときは即時反映する。
+        now = time.monotonic()
+        key = (self._reconnecting.is_set(), self._state, self._speaking)
+        if key == self._last_status_key and (now - self._last_status_at) < 0.1:
             return
+        self._last_status_key = key
+        self._last_status_at = now
 
-        if self._reconnecting.is_set():
-            self.status_callback(
-                Text("⚠ ", style="yellow bold").append(
-                    "Reconnecting to OpenAI Realtime...", style="bold"
-                )
-            )
-            return
-
-        if self._state == BackendState.CONNECTING:
-            self.status_callback(
-                Text("● ", style="yellow bold").append(
-                    f"Connecting to OpenAI Realtime ({self._model})...",
-                    style="bold",
-                )
-            )
-        elif self._state == BackendState.TRANSLATING:
-            self.status_callback(
-                Text("● ", style="cyan bold").append(
-                    "Receiving Response (OpenAI Realtime)...", style="bold"
-                )
-            )
-        else:
+        # 左: 音声メーターは状態に関わらず常に表示
+        if self._audio_cb:
             cur_dur = 0.0
             if self._speaking and self._speaking_start_time > 0.0:
                 cur_dur = time.monotonic() - self._speaking_start_time
-
-            status_text = format_status(
-                backend_name="OpenAI Realtime",
-                in_segment=self._speaking,
-                db=self._current_level_db,
-                current_duration=cur_dur,
-                max_duration=self._max_segment_seconds,
+            self._audio_cb(
+                format_status(
+                    backend_name="OpenAI Realtime",
+                    in_segment=self._speaking,
+                    db=self._current_level_db,
+                    current_duration=cur_dur,
+                    max_duration=self._max_segment_seconds,
+                )
             )
-            self.status_callback(status_text)
+        # 右: 通信ステータス
+        if self._comm_cb:
+            self._comm_cb(self._comm_status_text())
 
     # ---------------- context manager ----------------
 

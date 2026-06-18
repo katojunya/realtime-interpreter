@@ -31,7 +31,7 @@ class LocalMLXBackend:
         max_segment_seconds: float,
     ) -> None:
         self.translator = translator
-        self.status_callback: Callable[[str | Text], None] | None = None
+        self._comm_cb: Callable[[object], None] | None = None
         self._capture = SpeechSegmentCapture(
             sd_module=sd_module,
             device_name=device_name,
@@ -39,14 +39,19 @@ class LocalMLXBackend:
             max_segment_seconds=max_segment_seconds,
         )
 
-    def set_status_callback(self, callback: Callable[[str | Text], None]) -> None:
-        self.status_callback = callback
-        self._capture.status_callback = callback
+    def set_status_callback(
+        self,
+        audio_cb: Callable[[object], None],
+        comm_cb: Callable[[object], None],
+    ) -> None:
+        # 左スロット(音声メーター)は capture が、右スロット(通信)は本 backend が更新。
+        self._comm_cb = comm_cb
+        self._capture.status_callback = audio_cb
 
     def __enter__(self) -> "LocalMLXBackend":
-        if self.status_callback:
+        if self._comm_cb:
             model_lbl = self.translator.model_id.split("/")[-1]
-            self.status_callback(f"⏳ Loading Model ({model_lbl} Local GPU)...")
+            self._comm_cb(f"⏳ Loading Model ({model_lbl} Local GPU)...")
         self.translator.load()
         self._capture.backend_name = "Local MLX"
         self._capture.__enter__()
@@ -67,9 +72,9 @@ class LocalMLXBackend:
     def stream_segments(self) -> Iterator[TranslatedSegment]:
         for segment in self._capture.segments():
             try:
-                if self.status_callback:
+                if self._comm_cb:
                     model_lbl = self.translator.model_id.split("/")[-1]
-                    self.status_callback(f"● Translating ({model_lbl} Local GPU Inference)...")
+                    self._comm_cb(f"● Translating ({model_lbl} Local GPU Inference)...")
                 result = self.translator.translate(segment.audio)
             except Exception:
                 logger.exception("translation failed")

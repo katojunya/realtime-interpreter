@@ -334,7 +334,7 @@ class OpenAIChatBackend:
         max_segment_seconds: float = MAX_SEGMENT_SECONDS,
     ) -> None:
         self.translator = translator
-        self.status_callback: Callable[[str | Text], None] | None = None
+        self._comm_cb: Callable[[object], None] | None = None
         self._repetition_guard = _RepetitionGuard()
         if sys.platform == "win32":
             self._capture = WindowsLoopbackSpeechSegmentCapture(
@@ -350,9 +350,14 @@ class OpenAIChatBackend:
                 max_segment_seconds=max_segment_seconds,
             )
 
-    def set_status_callback(self, callback: Callable[[str | Text], None]) -> None:
-        self.status_callback = callback
-        self._capture.status_callback = callback
+    def set_status_callback(
+        self,
+        audio_cb: Callable[[object], None],
+        comm_cb: Callable[[object], None],
+    ) -> None:
+        # 左スロット(音声メーター)は capture が、右スロット(通信)は本 backend が更新。
+        self._comm_cb = comm_cb
+        self._capture.status_callback = audio_cb
 
     def __enter__(self) -> "OpenAIChatBackend":
         self._capture.backend_name = "OpenAI Chat"
@@ -374,8 +379,8 @@ class OpenAIChatBackend:
     def stream_segments(self) -> Iterator[TranslatedSegment]:
         for segment in self._capture.segments():
             try:
-                if self.status_callback:
-                    self.status_callback(
+                if self._comm_cb:
+                    self._comm_cb(
                         Text("● ", style="cyan bold").append(
                             "Translating (OpenAI Chat API Request)... [Waiting API]",
                             style="bold",
