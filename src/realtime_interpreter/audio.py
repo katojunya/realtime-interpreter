@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import threading
 import time
 from dataclasses import dataclass
 from types import ModuleType, TracebackType
@@ -194,6 +195,11 @@ class _BaseSpeechSegmentCapture:
         self.status_callback: Callable[[str | Text], None] | None = None
         self.backend_name = "Local"
 
+        # メーター送出用ティッカー. segments()/translate() のブロッキングに依らず
+        # 0.1s 毎にレベルを送出し続けるための専用スレッド。
+        self._status_thread: threading.Thread | None = None
+        self._status_stop = threading.Event()
+
         # セグメント状態
         self._in_segment = False
         self._segment_chunks: list[np.ndarray] = []
@@ -242,26 +248,55 @@ class _BaseSpeechSegmentCapture:
             duration_seconds=len(audio) / self.sample_rate,
         )
 
+    def _emit_meter_once(self) -> None:
+        """現在の音量レベルをメーターとして 1 回送出する.
+
+        値 (current_level_db / _in_segment / _segment_total_samples) は音声コールバックや
+        segments() が更新する。ここでは読むだけなので、translate() ブロッキング中でも
+        ティッカースレッドから安全に呼べる。
+        """
+        if self.status_callback is None:
+            return
+        cur_dur = self._segment_total_samples / self.sample_rate
+        max_dur = self._max_segment_samples / self.sample_rate
+        self.status_callback(
+            format_status(
+                backend_name=self.backend_name,
+                in_segment=self._in_segment,
+                db=self.current_level_db,
+                current_duration=cur_dur,
+                max_duration=max_dur,
+            )
+        )
+
+    def _status_loop(self) -> None:
+        while not self._status_stop.is_set():
+            self._emit_meter_once()
+            self._status_stop.wait(0.1)
+
+    def _start_status_thread(self) -> None:
+        """メーター送出ティッカーを開始する (サブクラスの __enter__ から呼ぶ)."""
+        self._status_stop.clear()
+        self._status_thread = threading.Thread(
+            target=self._status_loop, name="capture-meter", daemon=True
+        )
+        self._status_thread.start()
+
+    def _stop_status_thread(self) -> None:
+        """メーター送出ティッカーを停止する (サブクラスの __exit__ から呼ぶ)."""
+        self._status_stop.set()
+        if self._status_thread is not None:
+            self._status_thread.join(timeout=1.0)
+            self._status_thread = None
+
     def segments(self, poll_interval: float = 0.05) -> Iterator[SpeechSegment]:
-        """発話セグメントが完結するたびに yield する."""
-        last_status_update = 0.0
+        """発話セグメントが完結するたびに yield する.
+
+        メーター送出は _status_loop ティッカースレッドが担うため、ここでは行わない
+        (translate() ブロッキング中もメーターを動かし続けるため)。
+        """
         while True:
             self._drain_queue()
-
-            now = time.monotonic()
-            if self.status_callback and now - last_status_update >= 0.1:
-                cur_dur = self._segment_total_samples / self.sample_rate
-                max_dur = self._max_segment_samples / self.sample_rate
-                status_text = format_status(
-                    backend_name=self.backend_name,
-                    in_segment=self._in_segment,
-                    db=self.current_level_db,
-                    current_duration=cur_dur,
-                    max_duration=max_dur,
-                )
-                self.status_callback(status_text)
-                last_status_update = now
-
             offset = 0
             while len(self._buffer) - offset >= self._vad_window:
                 window = self._buffer[offset : offset + self._vad_window]
@@ -339,6 +374,7 @@ class SpeechSegmentCapture(_BaseSpeechSegmentCapture):
             callback=self._callback,
         )
         self._stream.start()
+        self._start_status_thread()
         return self
 
     def __exit__(
@@ -347,6 +383,7 @@ class SpeechSegmentCapture(_BaseSpeechSegmentCapture):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
+        self._stop_status_thread()
         if self._stream is not None:
             self._stream.stop()
             self._stream.close()
@@ -430,6 +467,7 @@ class WindowsLoopbackSpeechSegmentCapture(_BaseSpeechSegmentCapture):
             stream_callback=_pa_callback,
         )
         self._stream.start_stream()
+        self._start_status_thread()
         return self
 
     def __exit__(
@@ -438,6 +476,7 @@ class WindowsLoopbackSpeechSegmentCapture(_BaseSpeechSegmentCapture):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
+        self._stop_status_thread()
         try:
             if self._stream is not None:
                 self._stream.stop_stream()
