@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import logging
 from types import ModuleType, TracebackType
-from typing import Iterator
+from typing import Iterator, Callable
+
+from rich.text import Text
 
 from realtime_interpreter.audio import SpeechSegmentCapture
 from realtime_interpreter.backends.base import TranslatedSegment
@@ -29,6 +31,7 @@ class LocalMLXBackend:
         max_segment_seconds: float,
     ) -> None:
         self.translator = translator
+        self.status_callback: Callable[[str | Text], None] | None = None
         self._capture = SpeechSegmentCapture(
             sd_module=sd_module,
             device_name=device_name,
@@ -36,8 +39,16 @@ class LocalMLXBackend:
             max_segment_seconds=max_segment_seconds,
         )
 
+    def set_status_callback(self, callback: Callable[[str | Text], None]) -> None:
+        self.status_callback = callback
+        self._capture.status_callback = callback
+
     def __enter__(self) -> "LocalMLXBackend":
+        if self.status_callback:
+            model_lbl = self.translator.model_id.split("/")[-1]
+            self.status_callback(f"⏳ Loading Model ({model_lbl} Local GPU)...")
         self.translator.load()
+        self._capture.backend_name = "Local MLX"
         self._capture.__enter__()
         return self
 
@@ -56,6 +67,9 @@ class LocalMLXBackend:
     def stream_segments(self) -> Iterator[TranslatedSegment]:
         for segment in self._capture.segments():
             try:
+                if self.status_callback:
+                    model_lbl = self.translator.model_id.split("/")[-1]
+                    self.status_callback(f"● Translating ({model_lbl} Local GPU Inference)...")
                 result = self.translator.translate(segment.audio)
             except Exception:
                 logger.exception("translation failed")

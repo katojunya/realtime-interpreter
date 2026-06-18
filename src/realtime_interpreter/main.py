@@ -1029,60 +1029,60 @@ def main() -> None:
     )
 
     try:
-        with backend, StreamingRenderer() as renderer:
-            renderer.update_status("● Listening...")
-            for seg in backend.stream_segments():
-                if session_deadline is not None and time.monotonic() >= session_deadline:
-                    logger.info(
-                        "max-session-seconds reached (%ds); stopping.",
-                        args.max_session_seconds,
-                    )
-                    print(
-                        f"\n--max-session-seconds ({args.max_session_seconds}s) reached. "
-                        "Stopping. (pass 0 for unlimited)",
-                        file=sys.stderr,
-                    )
-                    break
-                ts = format_offset(seg.start_offset_seconds)
-                if seg.is_partial:
-                    # in-place 更新. ログ・要約バッファには触らない。
-                    renderer.update_current(ts, seg.source, seg.target)
-                    continue
+        with StreamingRenderer() as renderer:
+            if hasattr(backend, "set_status_callback"):
+                backend.set_status_callback(renderer.update_status)
+            with backend:
+                for seg in backend.stream_segments():
+                    if session_deadline is not None and time.monotonic() >= session_deadline:
+                        logger.info(
+                            "max-session-seconds reached (%ds); stopping.",
+                            args.max_session_seconds,
+                        )
+                        print(
+                            f"\n--max-session-seconds ({args.max_session_seconds}s) reached. "
+                            "Stopping. (pass 0 for unlimited)",
+                            file=sys.stderr,
+                        )
+                        break
+                    ts = format_offset(seg.start_offset_seconds)
+                    if seg.is_partial:
+                        # in-place 更新. ログ・要約バッファには触らない。
+                        renderer.update_current(ts, seg.source, seg.target)
+                        continue
 
-                # 確定セグメント: 永続表示・ログ・要約バッファ反映
-                renderer.commit(ts, seg.source, seg.target)
-                session_logger.log_segment(ts, seg.source, seg.target)
-                if summarizer is not None and seg.source.strip():
-                    source_buffer.append(
-                        (seg.start_offset_seconds, seg.source.strip())
-                    )
+                    # 確定セグメント: 永続表示・ログ・要約バッファ反映
+                    renderer.commit(ts, seg.source, seg.target)
+                    session_logger.log_segment(ts, seg.source, seg.target)
+                    if summarizer is not None and seg.source.strip():
+                        source_buffer.append(
+                            (seg.start_offset_seconds, seg.source.strip())
+                        )
 
-                segment_end = seg.start_offset_seconds + seg.duration_seconds
-                if (
-                    summarizer is not None
-                    and summary_executor is not None
-                    and segment_end - summary_last_offset >= summary_interval > 0
-                ):
-                    # 非同期投入. メインループは即座に次セグメント処理へ戻る.
-                    _submit_summary_task(
-                        summary_executor,
-                        summarizer,
-                        list(source_buffer),  # worker に渡すスナップショット
-                        summary_last_offset,
-                        segment_end,
-                        int(summary_interval),
-                        session_logger,
-                        renderer,
-                        summary_state,
-                        backend,
-                    )
-                    summary_last_offset = segment_end
-                    cutoff = segment_end - summary_interval * 2
-                    source_buffer[:] = [
-                        (ts_, t) for ts_, t in source_buffer if ts_ >= cutoff
-                    ]
-
-                renderer.update_status("● Listening...")
+                    segment_end = seg.start_offset_seconds + seg.duration_seconds
+                    if (
+                        summarizer is not None
+                        and summary_executor is not None
+                        and segment_end - summary_last_offset >= summary_interval > 0
+                    ):
+                        # 非同期投入. メインループは即座に次セグメント処理へ戻る.
+                        _submit_summary_task(
+                            summary_executor,
+                            summarizer,
+                            list(source_buffer),  # worker に渡すスナップショット
+                            summary_last_offset,
+                            segment_end,
+                            int(summary_interval),
+                            session_logger,
+                            renderer,
+                            summary_state,
+                            backend,
+                        )
+                        summary_last_offset = segment_end
+                        cutoff = segment_end - summary_interval * 2
+                        source_buffer[:] = [
+                            (ts_, t) for ts_, t in source_buffer if ts_ >= cutoff
+                        ]
 
     except KeyboardInterrupt:
         pass

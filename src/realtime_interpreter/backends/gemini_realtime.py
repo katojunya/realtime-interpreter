@@ -19,12 +19,13 @@ import threading
 import time
 from dataclasses import dataclass, field
 from types import ModuleType, TracebackType
-from typing import Iterator
+from typing import Iterator, Callable
+from rich.text import Text
 
 import numpy as np
 
-from realtime_interpreter.audio import DEVICE_NAME
-from realtime_interpreter.backends.base import TranslatedSegment
+from realtime_interpreter.audio import DEVICE_NAME, _compute_dbfs, format_status
+from realtime_interpreter.backends.base import TranslatedSegment, BackendState
 from realtime_interpreter.i18n import DEFAULT_SOURCE, DEFAULT_TARGET, language_name
 
 logger = logging.getLogger(__name__)
@@ -168,7 +169,57 @@ class GeminiRealtimeBackend:
         self._level_samples: int = 0
         self._level_last_log_at: float = 0.0
 
+        # ステータス表示状態
+        self.status_callback: Callable[[str | Text], None] | None = None
+        self._state: BackendState = BackendState.CONNECTING
+        self._speaking: bool = False
+        self._speaking_start_time: float = 0.0
+        self._current_level_db: float = -90.0
+
+    def set_status_callback(self, callback: Callable[[str | Text], None]) -> None:
+        self.status_callback = callback
+
+    def _update_status_display(self) -> None:
+        if not self.status_callback:
+            return
+
+        if self._reconnecting.is_set():
+            msg = "Reconnecting to Gemini Live API..."
+            if self._resumption_handle:
+                msg += " [Resuming Session]"
+            self.status_callback(Text("⚠ ", style="yellow bold").append(msg, style="bold"))
+            return
+
+        if self._state == BackendState.CONNECTING:
+            self.status_callback(
+                Text("● ", style="yellow bold").append(
+                    f"Connecting to Gemini Live API ({self._model.split('/')[-1]})...",
+                    style="bold",
+                )
+            )
+        elif self._state == BackendState.TRANSLATING:
+            self.status_callback(
+                Text("● ", style="cyan bold").append(
+                    "Receiving Response (Gemini Live)...", style="bold"
+                )
+            )
+        else:
+            cur_dur = 0.0
+            if self._speaking and self._speaking_start_time > 0.0:
+                cur_dur = time.monotonic() - self._speaking_start_time
+
+            status_text = format_status(
+                backend_name="Gemini Live",
+                in_segment=self._speaking,
+                db=self._current_level_db,
+                current_duration=cur_dur,
+                max_duration=self._max_segment_seconds,
+            )
+            self.status_callback(status_text)
+
     def __enter__(self) -> GeminiRealtimeBackend:
+        self._state = BackendState.CONNECTING
+        self._update_status_display()
         self._capture_start_monotonic = time.monotonic()
         self._open_websocket()
         self._send_session_config()
@@ -330,6 +381,7 @@ class GeminiRealtimeBackend:
                     arr = arr.reshape(-1, channels)
                 mono = _to_mono(arr)
                 mono = _resample_linear(mono, self._capture_rate, GEMINI_SAMPLE_RATE)
+                self._current_level_db = _compute_dbfs(mono)
                 if mono.size:
                     self._audio_queue.put(mono)
             except Exception:
@@ -371,6 +423,7 @@ class GeminiRealtimeBackend:
         if status:
             logger.warning("audio status: %s", status)
         mono = np.mean(indata, axis=1).astype(np.float32)
+        self._current_level_db = _compute_dbfs(mono)
         self._audio_queue.put(mono)
 
     def _send_loop(self) -> None:
@@ -379,6 +432,7 @@ class GeminiRealtimeBackend:
                 chunk = self._audio_queue.get(timeout=0.1)
             except queue.Empty:
                 self._maybe_log_level()
+                self._update_status_display()
                 continue
             # 再接続中は送信しない (まだ ws が無効). 古い音声は捨ててバックログを防ぐ。
             if self._reconnecting.is_set():
@@ -395,6 +449,7 @@ class GeminiRealtimeBackend:
                 time.sleep(0.1)
                 continue
             self._maybe_log_level()
+            self._update_status_display()
 
     def _update_level(self, chunk: np.ndarray) -> None:
         if len(chunk) == 0:
@@ -515,6 +570,8 @@ class GeminiRealtimeBackend:
         指数バックオフ (0.5, 1, 2, 4, 8 秒上限) でリトライ。
         """
         self._reconnecting.set()
+        self._state = BackendState.RECONNECTING
+        self._update_status_display()
         try:
             delay = 0.5
             for attempt in range(1, max_attempts + 1):
@@ -534,6 +591,8 @@ class GeminiRealtimeBackend:
                         attempt,
                         self._resumption_handle is not None,
                     )
+                    self._state = BackendState.LISTENING
+                    self._update_status_display()
                     return True
                 except Exception:
                     logger.warning(
@@ -556,6 +615,8 @@ class GeminiRealtimeBackend:
 
         if "setupComplete" in event:
             logger.info("Gemini Live API setup complete.")
+            self._state = BackendState.LISTENING
+            self._update_status_display()
             return
 
         usage_metadata = event.get("usageMetadata")
@@ -597,6 +658,10 @@ class GeminiRealtimeBackend:
             text = input_transcription.get("text", "")
             if text:
                 self._append_input(text)
+                if not self._speaking:
+                    self._speaking = True
+                    self._speaking_start_time = time.monotonic()
+                    self._state = BackendState.SPEAKING
 
         # 2. Model generated content (translation)
         # Try both outputTranscription (modern API) and outputAudioTranscription (fallback/older API)
@@ -605,14 +670,22 @@ class GeminiRealtimeBackend:
             text = output_transcription.get("text", "")
             if text:
                 self._append_output(text)
+                if self._state != BackendState.TRANSLATING:
+                    self._state = BackendState.TRANSLATING
+                    self._update_status_display()
 
         model_turn = server_content.get("modelTurn")
         if model_turn:
             parts = model_turn.get("parts", [])
+            has_new_output = False
             for part in parts:
                 text_part = part.get("text", "")
                 if text_part:
                     self._append_output(text_part)
+                    has_new_output = True
+            if has_new_output and self._state != BackendState.TRANSLATING:
+                self._state = BackendState.TRANSLATING
+                self._update_status_display()
 
         # 3. Turn complete
         # NOTE: ここで即コミットしない。live-translate は短い翻訳単位ごとに
@@ -672,6 +745,9 @@ class GeminiRealtimeBackend:
             return
         turn = self._pending_turn
         self._pending_turn = None
+        self._speaking = False
+        self._state = BackendState.LISTENING
+        self._update_status_display()
         src = turn.source()
         tgt = turn.target()
         if not src and not tgt:

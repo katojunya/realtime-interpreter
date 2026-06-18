@@ -17,7 +17,9 @@ import queue
 import time
 from dataclasses import dataclass
 from types import ModuleType, TracebackType
-from typing import Iterator
+from typing import Iterator, Callable
+
+from rich.text import Text
 
 import numpy as np
 
@@ -76,6 +78,51 @@ def _resample_linear(mono: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarr
     x_old = np.arange(mono.size, dtype=np.float64)
     x_new = np.linspace(0.0, mono.size - 1, n_out)
     return np.interp(x_new, x_old, mono).astype(np.float32)
+
+
+def _compute_dbfs(mono: np.ndarray) -> float:
+    if mono.size == 0:
+        return -90.0
+    peak = float(np.max(np.abs(mono)))
+    if peak <= 0:
+        return -90.0
+    return 20.0 * np.log10(max(peak, 1e-10))
+
+
+def build_level_meter(db: float, num_blocks: int = 10) -> str:
+    min_db = -45.0
+    max_db = -3.0
+    if db <= min_db:
+        filled = 0
+    elif db >= max_db:
+        filled = num_blocks
+    else:
+        filled = int((db - min_db) / (max_db - min_db) * num_blocks)
+    return "■" * filled + "□" * (num_blocks - filled)
+
+
+def format_status(
+    backend_name: str,
+    in_segment: bool,
+    db: float,
+    current_duration: float = 0.0,
+    max_duration: float = 0.0,
+) -> Text:
+    meter = build_level_meter(db)
+    db_str = f"{db:+.1f}dB" if db > -90.0 else "-inf dB"
+
+    if in_segment:
+        text = Text("● ", style="red bold")
+        text.append(f"Capturing ({backend_name}) ", style="bold")
+        text.append(f"[{meter}] ", style="green")
+        text.append(f"{db_str} ", style="yellow")
+        text.append(f"({current_duration:.1f}s / {max_duration:.1f}s)", style="dim")
+    else:
+        text = Text("● ", style="green bold")
+        text.append(f"Listening ({backend_name}) ", style="bold")
+        text.append(f"[{meter}] ", style="green")
+        text.append(f"{db_str}", style="yellow")
+    return text
 
 
 def _find_loopback_device(pa, name: str | None):
@@ -144,6 +191,10 @@ class _BaseSpeechSegmentCapture:
 
         self._capture_start_monotonic: float | None = None
 
+        self.current_level_db = -90.0
+        self.status_callback: Callable[[str | Text], None] | None = None
+        self.backend_name = "Local"
+
         # セグメント状態
         self._in_segment = False
         self._segment_chunks: list[np.ndarray] = []
@@ -194,8 +245,24 @@ class _BaseSpeechSegmentCapture:
 
     def segments(self, poll_interval: float = 0.05) -> Iterator[SpeechSegment]:
         """発話セグメントが完結するたびに yield する."""
+        last_status_update = 0.0
         while True:
             self._drain_queue()
+
+            now = time.monotonic()
+            if self.status_callback and now - last_status_update >= 0.1:
+                cur_dur = self._segment_total_samples / self.sample_rate
+                max_dur = self._max_segment_samples / self.sample_rate
+                status_text = format_status(
+                    backend_name=self.backend_name,
+                    in_segment=self._in_segment,
+                    db=self.current_level_db,
+                    current_duration=cur_dur,
+                    max_duration=max_dur,
+                )
+                self.status_callback(status_text)
+                last_status_update = now
+
             offset = 0
             while len(self._buffer) - offset >= self._vad_window:
                 window = self._buffer[offset : offset + self._vad_window]
@@ -294,7 +361,9 @@ class SpeechSegmentCapture(_BaseSpeechSegmentCapture):
     ) -> None:
         if status:
             logger.warning("Audio status: %s", status)
-        self._raw_queue.put(_to_mono(indata))
+        mono = _to_mono(indata)
+        self.current_level_db = _compute_dbfs(mono)
+        self._raw_queue.put(mono)
 
 
 class WindowsLoopbackSpeechSegmentCapture(_BaseSpeechSegmentCapture):
@@ -345,6 +414,7 @@ class WindowsLoopbackSpeechSegmentCapture(_BaseSpeechSegmentCapture):
                     arr = arr.reshape(-1, channels)
                 mono = _to_mono(arr)
                 mono = _resample_linear(mono, self._capture_rate, self.sample_rate)
+                self.current_level_db = _compute_dbfs(mono)
                 if mono.size:
                     self._raw_queue.put(mono)
             except Exception:
