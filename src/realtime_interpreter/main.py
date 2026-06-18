@@ -1076,7 +1076,10 @@ def main() -> None:
     try:
         with StreamingRenderer() as renderer:
             if hasattr(backend, "set_status_callback"):
-                backend.set_status_callback(renderer.update_status)
+                # 左=音声入力レベル / 右=LLM通信ステータス の 2 スロットへ配線
+                backend.set_status_callback(
+                    renderer.update_audio_status, renderer.update_comm_status
+                )
             with backend:
                 for seg in backend.stream_segments():
                     if session_deadline is not None and time.monotonic() >= session_deadline:

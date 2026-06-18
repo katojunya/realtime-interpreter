@@ -69,7 +69,15 @@ class TranslationBackend(Protocol):
         """確定したセグメントを順次 yield する (無限イテレータ)."""
         ...
 
-    def set_status_callback(self, callback: Callable[[str], None]) -> None:
-        """TUIのステータス表示を更新するためのコールバックを登録する."""
+    def set_status_callback(
+        self,
+        audio_cb: Callable[[object], None],
+        comm_cb: Callable[[object], None],
+    ) -> None:
+        """ステータス表示の2スロットを更新するコールバックを登録する.
+
+        audio_cb: 左スロット = 音声入力レベル (capture スレッドから随時更新)。
+        comm_cb:  右スロット = LLM 通信ステータス (接続/受信/翻訳/再接続 等)。
+        """
         ...
 
