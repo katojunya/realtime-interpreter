@@ -3,8 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from types import TracebackType
-from typing import Iterator, Protocol, runtime_checkable
+from typing import Iterator, Protocol, runtime_checkable, Callable
+
+
+class BackendState(Enum):
+    """バックエンドの動作状態."""
+
+    LOADING_MODEL = "loading_model"  # ローカルモデル読み込み中
+    CONNECTING = "connecting"        # サーバー接続中
+    LISTENING = "listening"          # 発話待ち (無音)
+    SPEAKING = "speaking"            # 発話検知中 (音声バッファ蓄積中 / 音声送信中)
+    TRANSLATING = "translating"      # 翻訳・推論実行中
+    RECONNECTING = "reconnecting"    # 再接続試行中
 
 
 @dataclass
@@ -56,3 +68,8 @@ class TranslationBackend(Protocol):
     def stream_segments(self) -> Iterator[TranslatedSegment]:
         """確定したセグメントを順次 yield する (無限イテレータ)."""
         ...
+
+    def set_status_callback(self, callback: Callable[[str], None]) -> None:
+        """TUIのステータス表示を更新するためのコールバックを登録する."""
+        ...
+

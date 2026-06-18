@@ -31,12 +31,13 @@ import threading
 import time
 from dataclasses import dataclass, field
 from types import ModuleType, TracebackType
-from typing import Iterator
+from typing import Iterator, Callable
+from rich.text import Text
 
 import numpy as np
 
-from realtime_interpreter.audio import DEVICE_NAME
-from realtime_interpreter.backends.base import TranslatedSegment
+from realtime_interpreter.audio import DEVICE_NAME, _compute_dbfs, format_status
+from realtime_interpreter.backends.base import TranslatedSegment, BackendState
 from realtime_interpreter.i18n import DEFAULT_SOURCE, DEFAULT_TARGET
 
 logger = logging.getLogger(__name__)
@@ -280,6 +281,13 @@ class OpenAIRealtimeBackend:
         self._level_samples: int = 0
         self._level_last_log_at: float = 0.0
 
+        # ステータス表示状態
+        self.status_callback: Callable[[str | Text], None] | None = None
+        self._state: BackendState = BackendState.CONNECTING
+        self._speaking: bool = False
+        self._speaking_start_time: float = 0.0
+        self._current_level_db: float = -90.0
+
         # ターン状態 (recv / emit スレッドから触るのでロック)
         self._pending_lock = threading.Lock()
         self._pending_turn: _PendingTurn | None = None
@@ -296,9 +304,53 @@ class OpenAIRealtimeBackend:
 
         self._capture_start_monotonic: float | None = None
 
+    def set_status_callback(self, callback: Callable[[str | Text], None]) -> None:
+        self.status_callback = callback
+
+    def _update_status_display(self) -> None:
+        if not self.status_callback:
+            return
+
+        if self._reconnecting.is_set():
+            self.status_callback(
+                Text("⚠ ", style="yellow bold").append(
+                    "Reconnecting to OpenAI Realtime...", style="bold"
+                )
+            )
+            return
+
+        if self._state == BackendState.CONNECTING:
+            self.status_callback(
+                Text("● ", style="yellow bold").append(
+                    f"Connecting to OpenAI Realtime ({self._model})...",
+                    style="bold",
+                )
+            )
+        elif self._state == BackendState.TRANSLATING:
+            self.status_callback(
+                Text("● ", style="cyan bold").append(
+                    "Receiving Response (OpenAI Realtime)...", style="bold"
+                )
+            )
+        else:
+            cur_dur = 0.0
+            if self._speaking and self._speaking_start_time > 0.0:
+                cur_dur = time.monotonic() - self._speaking_start_time
+
+            status_text = format_status(
+                backend_name="OpenAI Realtime",
+                in_segment=self._speaking,
+                db=self._current_level_db,
+                current_duration=cur_dur,
+                max_duration=self._max_segment_seconds,
+            )
+            self.status_callback(status_text)
+
     # ---------------- context manager ----------------
 
     def __enter__(self) -> "OpenAIRealtimeBackend":
+        self._state = BackendState.CONNECTING
+        self._update_status_display()
         self._capture_start_monotonic = time.monotonic()
         self._open_websocket()
         self._send_session_config()
@@ -379,9 +431,10 @@ class OpenAIRealtimeBackend:
 
     def _send_session_config(self) -> None:
         # 出力言語は self.target_lang (ISO 639-1) を `audio.output.language` に指定.
-        # 入力 (source) の transcript は gpt-realtime-whisper で. source 言語は Whisper
-        # の auto-detect 任せ (multilingual で安定). 明示したい場合は input.transcription.language
-        # に渡す手もあるが、auto のほうが多くの音声で堅牢。
+        # 入力 (source) の transcript は gpt-realtime-whisper で.
+        # ※ 注意: 翻訳特化の gpt-realtime-translate API では、audio.input.transcription に
+        # 'language' パラメータを指定すると "Unknown parameter: 'session.audio.input.transcription.language'"
+        # となりエラーになるため、入力言語は自動検知 (Auto-detect) に任せる必要があります。
         msg = {
             "type": "session.update",
             "session": {
@@ -486,6 +539,7 @@ class OpenAIRealtimeBackend:
         if status:
             logger.warning("audio status: %s", status)
         mono = np.mean(indata, axis=1).astype(np.float32)
+        self._current_level_db = _compute_dbfs(mono)
         self._audio_queue.put(mono)
 
     # ---------------- send loop ----------------
@@ -499,6 +553,7 @@ class OpenAIRealtimeBackend:
                 chunk = self._audio_queue.get(timeout=0.1)
             except queue.Empty:
                 self._maybe_log_level()
+                self._update_status_display()
                 continue
             # 再接続中は送信しない (まだ ws が無効). 古い音声は捨ててバックログを防ぐ。
             if self._reconnecting.is_set():
@@ -515,6 +570,7 @@ class OpenAIRealtimeBackend:
                 time.sleep(0.1)
                 continue
             self._maybe_log_level()
+            self._update_status_display()
 
     def _maybe_proactive_reconnect(self) -> None:
         """接続が 60 分制限に近づいたら、サーバ切断を待たずに自分から張り替える.
@@ -618,6 +674,8 @@ class OpenAIRealtimeBackend:
         OpenAI Realtime にセッション再開ハンドルは無いので新規セッションになる。
         """
         self._reconnecting.set()
+        self._state = BackendState.RECONNECTING
+        self._update_status_display()
         try:
             delay = 0.5
             for attempt in range(1, max_attempts + 1):
@@ -633,6 +691,8 @@ class OpenAIRealtimeBackend:
                         self._open_websocket()
                         self._send_session_config()
                     logger.info("OpenAI reconnected (attempt %d)", attempt)
+                    self._state = BackendState.LISTENING
+                    self._update_status_display()
                     return True
                 except Exception:
                     logger.warning(
@@ -653,6 +713,11 @@ class OpenAIRealtimeBackend:
             logger.error("OpenAI error: %s", event)
             return
 
+        if etype == "session.created" or etype == "session.updated":
+            self._state = BackendState.LISTENING
+            self._update_status_display()
+            return
+
         # 翻訳音声は使わない. ノイズ抑制のため明示スキップ.
         if etype.endswith("output_audio.delta") or etype.endswith("output_audio.done"):
             return
@@ -662,6 +727,9 @@ class OpenAIRealtimeBackend:
             delta = event.get("delta", "")
             if delta:
                 self._append_input(delta)
+                if self._state != BackendState.TRANSLATING:
+                    self._state = BackendState.TRANSLATING
+                    self._update_status_display()
             return
 
         # 日本語 (出力) 転写の delta
@@ -673,14 +741,24 @@ class OpenAIRealtimeBackend:
             delta = event.get("delta", "")
             if delta:
                 self._append_output(delta)
+                if self._state != BackendState.TRANSLATING:
+                    self._state = BackendState.TRANSLATING
+                    self._update_status_display()
             return
 
-        # サーバ VAD は本 API では明示イベントが無い可能性. 来たらログだけ出す.
-        if etype.endswith("speech_started"):
+        # サーバ VAD
+        if etype.endswith("speech_started") or "speech_started" in etype:
             logger.info("server VAD: speech_started")
+            self._speaking = True
+            self._speaking_start_time = time.monotonic()
+            self._state = BackendState.SPEAKING
+            self._update_status_display()
             return
-        if etype.endswith("speech_stopped"):
+        if etype.endswith("speech_stopped") or "speech_stopped" in etype:
             logger.info("server VAD: speech_stopped")
+            self._speaking = False
+            self._state = BackendState.LISTENING
+            self._update_status_display()
             return
 
         # session.created / session.updated / session.closed なども含めて
@@ -705,6 +783,10 @@ class OpenAIRealtimeBackend:
             assert self._pending_turn is not None
             self._pending_turn.source_parts.append(delta)
             self._pending_turn.last_activity_at = time.monotonic()
+            if not self._speaking:
+                self._speaking = True
+                self._speaking_start_time = time.monotonic()
+                self._state = BackendState.SPEAKING
             # 文末での即時 commit は EN/JA のズレを生むので使わない. 進行中表示のみ更新。
             self._emit_partial_locked()
 
@@ -846,6 +928,9 @@ class OpenAIRealtimeBackend:
         src = _clean_leading(turn.source())
         tgt = _clean_leading(turn.target())
         self._pending_turn = None
+        self._speaking = False
+        self._state = BackendState.LISTENING
+        self._update_status_display()
         # 句読点のみ (clean 後に両方空) のセグメントは表示しない
         if not src and not tgt:
             return

@@ -164,7 +164,10 @@ class StreamingRenderer:
                     )
                 )
         if self._status:
-            items.append(Text(self._status, style="yellow"))
+            if isinstance(self._status, Text):
+                items.append(self._status)
+            else:
+                items.append(Text(self._status, style="yellow"))
         return Group(*items)
 
     def _refresh(self) -> None:
@@ -227,7 +230,7 @@ class StreamingRenderer:
         self._console.print("")
         self._refresh()
 
-    def update_status(self, text: str) -> None:
+    def update_status(self, text: str | Text) -> None:
         self._status = text
         self._refresh()
 

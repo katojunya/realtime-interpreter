@@ -199,7 +199,7 @@ class GemmaAudioTranslator:
         from mlx_vlm import load
 
         t0 = time.perf_counter()
-        self._model, self._processor = load(self.model_id)
+        self._model, self._processor = load(self.model_id, strict=False)
         logger.info("Model loaded in %.1fs", time.perf_counter() - t0)
 
     @property
