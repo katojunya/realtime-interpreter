@@ -48,13 +48,26 @@ class LocalMLXBackend:
         self._comm_cb = comm_cb
         self._capture.status_callback = audio_cb
 
+    def _model_lbl(self) -> str:
+        return self.translator.model_id.split("/")[-1]
+
+    def _comm_translating(self) -> str:
+        """右スロット用: GPU 推論中."""
+        return f"> Translating ({self._model_lbl()} Local GPU Inference)..."
+
+    def _comm_listening(self) -> str:
+        """右スロット用: 推論完了後の発話待ち (idle)."""
+        return f"> Listening ({self._model_lbl()} Local GPU)..."
+
     def __enter__(self) -> "LocalMLXBackend":
         if self._comm_cb:
-            model_lbl = self.translator.model_id.split("/")[-1]
-            self._comm_cb(f"... Loading Model ({model_lbl} Local GPU)")
+            self._comm_cb(f"... Loading Model ({self._model_lbl()} Local GPU)")
         self.translator.load()
         self._capture.backend_name = "Local MLX"
         self._capture.__enter__()
+        # 最初の発話待ちから Listening を表示する。
+        if self._comm_cb:
+            self._comm_cb(self._comm_listening())
         return self
 
     def __exit__(
@@ -73,12 +86,16 @@ class LocalMLXBackend:
         for segment in self._capture.segments():
             try:
                 if self._comm_cb:
-                    model_lbl = self.translator.model_id.split("/")[-1]
-                    self._comm_cb(f"> Translating ({model_lbl} Local GPU Inference)...")
+                    self._comm_cb(self._comm_translating())
                 result = self.translator.translate(segment.audio)
             except Exception:
                 logger.exception("translation failed")
+                if self._comm_cb:
+                    self._comm_cb(self._comm_listening())
                 continue
+            # 翻訳完了 → 次の発話待ち (Listening) へ戻す。
+            if self._comm_cb:
+                self._comm_cb(self._comm_listening())
             yield TranslatedSegment(
                 start_offset_seconds=segment.start_offset_seconds,
                 duration_seconds=segment.duration_seconds,

@@ -362,7 +362,22 @@ class OpenAIChatBackend:
     def __enter__(self) -> "OpenAIChatBackend":
         self._capture.backend_name = "OpenAI Chat"
         self._capture.__enter__()
+        # 最初の発話待ちから Listening を表示する。
+        if self._comm_cb:
+            self._comm_cb(self._comm_listening())
         return self
+
+    def _comm_translating(self) -> Text:
+        """右スロット用: API リクエスト中 (推論中)."""
+        return Text("> ", style="cyan bold").append(
+            "Translating (OpenAI Chat API Request)... [Waiting API]", style="bold"
+        )
+
+    def _comm_listening(self) -> Text:
+        """右スロット用: 推論完了後の発話待ち (idle)."""
+        return Text("> ", style="cyan bold").append(
+            "Listening (OpenAI Chat API)...", style="bold"
+        )
 
     def __exit__(
         self,
@@ -380,16 +395,16 @@ class OpenAIChatBackend:
         for segment in self._capture.segments():
             try:
                 if self._comm_cb:
-                    self._comm_cb(
-                        Text("> ", style="cyan bold").append(
-                            "Translating (OpenAI Chat API Request)... [Waiting API]",
-                            style="bold",
-                        )
-                    )
+                    self._comm_cb(self._comm_translating())
                 result = self.translator.translate(segment.audio)
             except Exception:
                 logger.exception("openai-chat translation failed")
+                if self._comm_cb:
+                    self._comm_cb(self._comm_listening())
                 continue
+            # 翻訳完了 → 次の発話待ち (Listening) へ戻す。
+            if self._comm_cb:
+                self._comm_cb(self._comm_listening())
             # 幻覚抑制 (層2a): 直近と逐語一致する転写は破棄する。
             if self._repetition_guard.is_repeat(result.source):
                 logger.debug(
