@@ -90,6 +90,9 @@ def _compute_dbfs(mono: np.ndarray) -> float:
 
 
 def build_level_meter(db: float, num_blocks: int = 10) -> str:
+    # ASCII 文字 (#/-) を使う。■/□ など East Asian Width=Ambiguous の文字は
+    # ターミナル/フォントによって幅 1/2 が揺れ、メーターが dB 表示に重なるため。
+    # ASCII は常に幅 1 で全環境で整列する。
     min_db = -45.0
     max_db = -3.0
     if db <= min_db:
@@ -98,7 +101,7 @@ def build_level_meter(db: float, num_blocks: int = 10) -> str:
         filled = num_blocks
     else:
         filled = int((db - min_db) / (max_db - min_db) * num_blocks)
-    return "■" * filled + "□" * (num_blocks - filled)
+    return "#" * filled + "-" * (num_blocks - filled)
 
 
 def format_status(

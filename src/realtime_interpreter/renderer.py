@@ -109,13 +109,13 @@ class StreamingRenderer:
 
     使い方:
         with StreamingRenderer() as r:
-            r.update_status("● Listening...")
+            r.update_status("> Listening...")
             # delta 受信
             r.update_current("00:05", "We are", "私たち")
             r.update_current("00:05", "We are driven", "私たちは")
             # ターン確定 (debounce)
             r.commit("00:05", "We are driven by the idea.", "私たちは...")
-            r.update_status("● Listening...")
+            r.update_status("> Listening...")
     """
 
     def __init__(self) -> None:

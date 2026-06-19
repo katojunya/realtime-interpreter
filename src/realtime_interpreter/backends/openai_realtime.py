@@ -319,18 +319,18 @@ class OpenAIRealtimeBackend:
     def _comm_status_text(self) -> Text:
         """右スロット用の通信ステータス文言."""
         if self._reconnecting.is_set():
-            return Text("⚠ ", style="yellow bold").append(
+            return Text("! ", style="yellow bold").append(
                 "Reconnecting to OpenAI Realtime...", style="bold"
             )
         if self._state == BackendState.CONNECTING:
-            return Text("● ", style="yellow bold").append(
+            return Text("> ", style="yellow bold").append(
                 f"Connecting to OpenAI Realtime ({self._model})...", style="bold"
             )
         if self._state == BackendState.TRANSLATING:
-            return Text("● ", style="cyan bold").append(
+            return Text("> ", style="cyan bold").append(
                 "Receiving Response (OpenAI Realtime)...", style="bold"
             )
-        return Text("● ", style="green bold").append(
+        return Text("> ", style="green bold").append(
             "Listening (OpenAI Realtime)...", style="bold"
         )
 

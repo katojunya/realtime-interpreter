@@ -194,17 +194,17 @@ class GeminiRealtimeBackend:
             msg = "Reconnecting to Gemini Live API..."
             if self._resumption_handle:
                 msg += " [Resuming Session]"
-            return Text("⚠ ", style="yellow bold").append(msg, style="bold")
+            return Text("! ", style="yellow bold").append(msg, style="bold")
         if self._state == BackendState.CONNECTING:
-            return Text("● ", style="yellow bold").append(
+            return Text("> ", style="yellow bold").append(
                 f"Connecting to Gemini Live API ({self._model.split('/')[-1]})...",
                 style="bold",
             )
         if self._state == BackendState.TRANSLATING:
-            return Text("● ", style="cyan bold").append(
+            return Text("> ", style="cyan bold").append(
                 "Receiving Response (Gemini Live)...", style="bold"
             )
-        return Text("● ", style="green bold").append(
+        return Text("> ", style="green bold").append(
             "Listening (Gemini Live)...", style="bold"
         )
 

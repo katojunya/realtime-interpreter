@@ -24,18 +24,20 @@ def test_backend_state_enum() -> None:
 
 
 def test_level_meter_logic() -> None:
+    # メーターは幅依存を避けるため ASCII (#/-) を使う。
     # Test min DB bounds
     meter_min = build_level_meter(-60.0, num_blocks=10)
-    assert meter_min == "□" * 10
+    assert meter_min == "-" * 10
 
     # Test max DB bounds
     meter_max = build_level_meter(0.0, num_blocks=10)
-    assert meter_max == "■" * 10
+    assert meter_max == "#" * 10
 
     # Test intermediate
     meter_mid = build_level_meter(-24.0, num_blocks=10)
-    assert "■" in meter_mid
-    assert "□" in meter_mid
+    assert "#" in meter_mid
+    assert "-" in meter_mid
+    assert len(meter_mid) == 10  # 全環境で幅1 ASCII = 10 文字
 
 
 def test_compute_dbfs() -> None:

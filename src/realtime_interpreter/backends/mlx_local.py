@@ -51,7 +51,7 @@ class LocalMLXBackend:
     def __enter__(self) -> "LocalMLXBackend":
         if self._comm_cb:
             model_lbl = self.translator.model_id.split("/")[-1]
-            self._comm_cb(f"⏳ Loading Model ({model_lbl} Local GPU)...")
+            self._comm_cb(f"... Loading Model ({model_lbl} Local GPU)")
         self.translator.load()
         self._capture.backend_name = "Local MLX"
         self._capture.__enter__()
@@ -74,7 +74,7 @@ class LocalMLXBackend:
             try:
                 if self._comm_cb:
                     model_lbl = self.translator.model_id.split("/")[-1]
-                    self._comm_cb(f"● Translating ({model_lbl} Local GPU Inference)...")
+                    self._comm_cb(f"> Translating ({model_lbl} Local GPU Inference)...")
                 result = self.translator.translate(segment.audio)
             except Exception:
                 logger.exception("translation failed")

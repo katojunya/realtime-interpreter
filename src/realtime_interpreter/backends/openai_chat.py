@@ -381,7 +381,7 @@ class OpenAIChatBackend:
             try:
                 if self._comm_cb:
                     self._comm_cb(
-                        Text("● ", style="cyan bold").append(
+                        Text("> ", style="cyan bold").append(
                             "Translating (OpenAI Chat API Request)... [Waiting API]",
                             style="bold",
                         )
