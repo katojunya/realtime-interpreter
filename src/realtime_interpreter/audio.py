@@ -119,7 +119,10 @@ def format_status(
     で表現するため、ここには含めない。`backend_name` は呼び出し互換のため残置。
     """
     meter = build_level_meter(db)
-    db_str = f"{db:+.1f}dB" if db > -90.0 else "-inf dB"
+    # dB は右詰め固定幅 (符号込み幅5 + "dB" = 7) にして桁数差でのガタつきを防ぐ。
+    # 符号は数値に密着させ、不足分は左に空白 (例 "-15.3dB" / " -1.3dB" / " +0.5dB")。
+    # dBFS は約 -90 で下限 (それ以下は -inf 分岐) のため 6 桁 (-100.0) は発生しない。
+    db_str = f"{db:+5.1f}dB" if db > -90.0 else "-inf dB"
 
     text = Text(f"[{meter}] ", style="green")
     text.append(db_str, style="yellow")
