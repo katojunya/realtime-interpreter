@@ -168,3 +168,24 @@ def test_backends_implement_status_callbacks() -> None:
     backend_gemini.set_status_callback(audio_gem.append, comm_gem.append)
     assert backend_gemini._audio_cb == audio_gem.append
     assert backend_gemini._comm_cb == comm_gem.append
+
+
+def test_format_status_db_right_justified() -> None:
+    """dB は桁数が違っても固定幅 (右詰め・符号は数値に密着) で表示される."""
+    import re
+
+    two_digit = format_status(backend_name="x", in_segment=False, db=-15.3).plain
+    one_digit = format_status(backend_name="x", in_segment=False, db=-1.3).plain
+    pos_value = format_status(backend_name="x", in_segment=False, db=0.5).plain
+
+    # メーターは常に 10 桁なので "] " 直後の 7 文字が dB トークン。
+    def db_token(s: str) -> str:
+        m = re.search(r"\] (.{7})", s)
+        assert m is not None
+        return m.group(1)
+
+    assert db_token(two_digit) == "-15.3dB"
+    assert db_token(one_digit) == " -1.3dB"  # 先頭空白で右詰め
+    assert db_token(pos_value) == " +0.5dB"
+    # 桁数が違ってもフィールド幅は一定
+    assert len(db_token(two_digit)) == len(db_token(one_digit)) == 7
