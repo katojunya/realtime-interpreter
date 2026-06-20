@@ -169,8 +169,8 @@ Audio devices (Windows, WASAPI)
 Output devices — system audio via loopback (default). Select with --device <index>:
 
   [10] リモート オーディオ  rate=44100   <- default (used when --device omitted)
-  [11] EVF3285  rate=44100
-  [12] EVF3285  rate=44100
+  [11] EV3285  rate=44100
+  [12] EV3285  rate=44100
 
 Input devices — microphones. Select with --device <index>:
 
