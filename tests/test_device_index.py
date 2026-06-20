@@ -133,8 +133,7 @@ def _loopbacks() -> list[dict]:
 
 def test_loopback_by_index_disambiguates(_fake_pyaudiowpatch) -> None:
     pa = _FakePA(_loopbacks(), default_out_index=10)
-    # 名前では先頭 (index 11) のみ。番号なら 12 を一意指定できる。
-    assert _find_loopback_device(pa, "EVF3285")["index"] == 11
+    # 同名 (EVF3285) でも番号で一意指定できる (名前指定は廃止)。
     assert _find_loopback_device(pa, "12")["index"] == 12
     assert _find_loopback_device(pa, "11")["index"] == 11
 
@@ -155,8 +154,10 @@ def test_loopback_default_when_omitted(_fake_pyaudiowpatch) -> None:
 
 
 def test_backends_delegate_to_audio_resolvers() -> None:
-    # 重複定義を排し、index 対応が realtime 系にも効くことを担保する。
+    # 重複定義を排し、番号解決 (入力/Windows) が realtime 系にも効くことを担保する。
+    from realtime_interpreter.audio import _resolve_windows_capture_device
+
     assert gemini_realtime._find_input_device is find_device
-    assert gemini_realtime._find_loopback_device is _find_loopback_device
+    assert gemini_realtime._resolve_windows_capture_device is _resolve_windows_capture_device
     assert openai_realtime._find_input_device is find_device
-    assert openai_realtime._find_loopback_device is _find_loopback_device
+    assert openai_realtime._resolve_windows_capture_device is _resolve_windows_capture_device

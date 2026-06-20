@@ -54,6 +54,10 @@ from realtime_interpreter.audio import (
     DEVICE_NAME,
     END_SILENCE_MS,
     MAX_SEGMENT_SECONDS,
+    _looks_like_index,
+    _resolve_windows_capture_device,
+    _wasapi_input_devices,
+    find_device,
 )
 from realtime_interpreter.i18n import (
     DEFAULT_SOURCE,
@@ -172,10 +176,109 @@ def _enable_system_certs() -> None:
         )
 
 
-def _list_devices() -> None:
-    """`--device` に指定できるデバイスを表示する.
+def _resolve_device_arg(device: str | None) -> str:
+    """`--device` (番号のみ) を検証し、省略時はプラットフォーム既定 (DEVICE_NAME) を返す.
 
-    - Windows: PyAudioWPatch で WASAPI loopback デバイス (= 録音対象の出力) を列挙
+    番号文字列はそのまま返す。None は DEVICE_NAME(センチネル: Win=既定出力 loopback /
+    macOS=BlackHole)。数字でない値が来たら SystemExit (名前指定は廃止)。
+    """
+    if device is None:
+        return DEVICE_NAME
+    if not _looks_like_index(device):
+        raise SystemExit(
+            "error: --device must be an index number from --list-devices "
+            "(device names are no longer accepted)."
+        )
+    return device
+
+
+def _strip_loopback_suffix(name: str) -> str:
+    """表示用に PyAudioWPatch の '[Loopback]' 接尾辞を除く (出力名を素で見せる)."""
+    return name.replace("[Loopback]", "").rstrip()
+
+
+def _format_windows_device_list(
+    loopbacks: list[dict],
+    mics: list[dict],
+    default_out_name: str,
+    default_in_index: int,
+) -> list[str]:
+    """Windows の --list-devices 表示行を組み立てる (出力 + 入力の2セクションを常に表示).
+
+    どちらも `--device <番号>` で選ぶ。番号は出力/入力で一意なので自動判定される。
+    """
+    lines: list[str] = ["Audio devices (Windows, WASAPI)", ""]
+
+    lines.append("Output devices — system audio via loopback (default). Select with --device <index>:")
+    lines.append("")
+    if not loopbacks:
+        lines.append("  (no WASAPI loopback devices found)")
+    for lb in loopbacks:
+        name = _strip_loopback_suffix(lb["name"])
+        is_default = bool(default_out_name) and default_out_name in lb["name"]
+        marker = "   <- default (used when --device omitted)" if is_default else ""
+        lines.append(
+            f"  [{lb['index']:>2}] {name}  rate={int(lb['defaultSampleRate'])}{marker}"
+        )
+    lines.append("")
+
+    lines.append("Input devices — microphones. Select with --device <index>:")
+    lines.append("")
+    if not mics:
+        lines.append("  (no WASAPI microphone input devices found)")
+    for m in mics:
+        marker = "   <- default mic" if m["index"] == default_in_index else ""
+        lines.append(
+            f"  [{m['index']:>2}] {m['name']}  in={m['maxInputChannels']}  "
+            f"rate={int(m['defaultSampleRate'])}{marker}"
+        )
+    lines.append("")
+
+    lines.append("Tips:")
+    lines.append("  - Pass a device index to --device. A number auto-selects output (loopback)")
+    lines.append("    or microphone; numbers are unique across both lists.")
+    lines.append("  - Omit --device to capture the default output (speaker).")
+    return lines
+
+
+def _windows_capture_label(device_name: str) -> tuple[str, int, str] | None:
+    """Windows のキャプチャ対象を解決し (種別, index, 名前) を返す (起動表示用).
+
+    種別は "microphone" / "WASAPI loopback"。解決に失敗したら None
+    (呼び出し側でフォールバック表示する)。
+    """
+    try:
+        import pyaudiowpatch as pyaudio
+
+        pa = pyaudio.PyAudio()
+        try:
+            device, is_mic = _resolve_windows_capture_device(pa, device_name)
+            kind = "microphone" if is_mic else "WASAPI loopback"
+            return kind, int(device["index"]), _strip_loopback_suffix(device["name"])
+        finally:
+            pa.terminate()
+    except Exception:
+        return None
+
+
+def _macos_input_label(device_name: str) -> str | None:
+    """macOS/Linux のキャプチャ対象を解決し "[index] name" を返す (起動表示用).
+
+    解決に失敗したら None (呼び出し側でフォールバック表示する)。
+    """
+    try:
+        sd = _load_sounddevice()
+        idx = find_device(device_name, sd)
+        name = sd.query_devices(idx)["name"]
+        return f"[{idx}] {name}"
+    except Exception:
+        return None
+
+
+def _list_devices() -> None:
+    """`--device <番号>` に指定できるデバイスを表示する.
+
+    - Windows: WASAPI の出力(loopback 取り込み対象)と入力(マイク)を両方列挙
       (sounddevice は使わない — ARM64 で DLL がロードできないため)
     - macOS/Linux: sounddevice で入力デバイス (max_input_channels > 0) を列挙
     """
@@ -186,24 +289,14 @@ def _list_devices() -> None:
         try:
             wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
             default_out_index = wasapi_info["defaultOutputDevice"]
-            default_out = pa.get_device_info_by_index(default_out_index)
-            print("Loopback capture targets for --device (WASAPI):")
-            print()
+            default_out_name = pa.get_device_info_by_index(default_out_index)["name"]
             loopbacks = list(pa.get_loopback_device_info_generator())
-            if not loopbacks:
-                print("  (no WASAPI loopback devices found)")
-            for lb in loopbacks:
-                is_default = default_out["name"] in lb["name"]
-                marker = "  <- matches default output (used when --device omitted)" if is_default else ""
-                print(
-                    f"  [{lb['index']}] {lb['name']} "
-                    f"(in={lb['maxInputChannels']}, rate={int(lb['defaultSampleRate'])})"
-                    f"{marker}"
-                )
-            print()
-            print("On Windows, system audio is captured via WASAPI loopback.")
-            print("Omit --device to loopback the default speaker, or pass a loopback device")
-            print("name or its index number above (use the number for identical names).")
+            mics = _wasapi_input_devices(pa)
+            default_in_index = wasapi_info.get("defaultInputDevice", -1)
+            for line in _format_windows_device_list(
+                loopbacks, mics, default_out_name, default_in_index
+            ):
+                print(line)
         finally:
             pa.terminate()
         return
@@ -225,31 +318,37 @@ def _list_devices() -> None:
     if not found:
         print("  (no input-capable devices found)")
     print()
-    print("Pass a device name (substring match) or the index number above to --device")
-    print("to choose the capture input. Use the number to disambiguate identical names.")
+    print("Pass a device index number above to --device to choose the capture input.")
+    print("Omit --device to use the default (BlackHole 2ch).")
     print("On macOS, capture system audio via BlackHole 2ch (a Multi-Output Device routes")
     print("speaker audio into BlackHole so this program can read it as an input).")
 
 
 def _print_capture_target(device_name: str) -> None:
-    """起動時にキャプチャ対象を platform に応じた表現で表示する.
+    """起動時にキャプチャ対象 (番号 + 名前) を platform に応じて表示する.
 
-    Windows: WASAPI loopback (既定スピーカー or 指定出力デバイス) を案内。
-             macOS 用デフォルト名 (BlackHole 2ch) をそのまま出さない。
-    macOS/Linux: 入力デバイス名を表示。
+    番号で指定した場合も、解決したデバイスの「[index] 名前」を併記する。解決に
+    失敗した場合は簡易表示にフォールバックする (起動表示で落とさない)。
     """
     if _is_windows():
-        if not device_name or device_name == DEVICE_NAME:
-            target = "default output device (speaker)"
+        resolved = _windows_capture_label(device_name)
+        if resolved is not None:
+            kind, idx, name = resolved
+            hint = (
+                "Speak into the mic to translate."
+                if kind == "microphone"
+                else "Play audio from any app to translate it."
+            )
+            print(f"Capture ({kind}): [{idx}] {name}. {hint}", file=sys.stderr)
         else:
-            target = repr(device_name)
-        print(
-            f"Capture (WASAPI loopback): {target}. "
-            "Play audio from any app to translate it.",
-            file=sys.stderr,
-        )
+            target = (
+                "default output device (speaker)"
+                if (not device_name or device_name == DEVICE_NAME)
+                else f"device #{device_name}"
+            )
+            print(f"Capture (WASAPI loopback): {target}.", file=sys.stderr)
     else:
-        print(f"Input device: {device_name}", file=sys.stderr)
+        print(f"Input device: {_macos_input_label(device_name) or device_name}", file=sys.stderr)
 
 
 def _check_input_device(device_name: str) -> None:
@@ -265,7 +364,7 @@ def _check_input_device(device_name: str) -> None:
     sd = _load_sounddevice()
     default_out = sd.default.device[1]
     output_name = sd.query_devices(default_out)["name"]
-    print(f"Input device: {device_name}", file=sys.stderr)
+    print(f"Input device: {_macos_input_label(device_name) or device_name}", file=sys.stderr)
     if "複数出力" not in output_name and "multi" not in output_name.lower():
         print(
             f"⚠ Current system output is {output_name!r}. "
@@ -344,24 +443,22 @@ def _parse_args() -> argparse.Namespace:
             "Multi-Output Device if needed (macOS). Skipped by default."
         ),
     )
-    # --device の既定値は DEVICE_NAME ("BlackHole 2ch")。macOS では実デバイス名だが、
-    # Windows ではセンチネルで「既定の出力(スピーカー)を loopback 取り込み」を意味する。
-    # そのため help はプラットフォーム別にし、Windows で BlackHole を既定表示しない。
+    # --device は番号(--list-devices のインデックス)のみ。省略時はプラットフォーム既定
+    # (Windows=既定スピーカーの loopback / macOS=BlackHole)。名前指定は廃止。
     if _is_windows():
         device_help = (
-            "Capture device (WASAPI loopback): loopback device name (substring) or "
-            "index number from --list-devices. Use the number to disambiguate "
-            "identically-named devices. Omit to capture the default output (speaker)."
+            "Capture device index number from --list-devices. A number auto-selects "
+            "output (loopback) or microphone. Omit to capture the default output (speaker)."
         )
     else:
         device_help = (
-            "Capture device: name substring or index number from --list-devices. "
-            "Use the number to disambiguate identically-named devices. "
-            f"(default: {DEVICE_NAME!r})"
+            "Capture device index number from --list-devices. "
+            "Omit to use the default (BlackHole 2ch)."
         )
     parser.add_argument(
         "--device",
-        default=DEVICE_NAME,
+        default=None,
+        metavar="INDEX",
         help=device_help,
     )
 
@@ -1036,6 +1133,10 @@ def main() -> None:
     if args.list_devices:
         _list_devices()
         return
+
+    # --device は番号 (--list-devices のインデックス) のみ。非数字はエラー。省略時は
+    # プラットフォーム既定 (DEVICE_NAME センチネル: Win=既定出力 loopback / mac=BlackHole)。
+    args.device = _resolve_device_arg(args.device)
 
     import datetime as dt
     timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")

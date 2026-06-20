@@ -27,8 +27,8 @@ import numpy as np
 from realtime_interpreter.audio import (
     DEVICE_NAME,
     _compute_dbfs,
-    _find_loopback_device,
     _input_channels,
+    _resolve_windows_capture_device,
     find_device as _find_input_device,
     format_status,
 )
@@ -359,11 +359,13 @@ class GeminiRealtimeBackend:
             )
 
         self._pa = pyaudio.PyAudio()
-        device = _find_loopback_device(self._pa, self._device_name)
+        # 番号で loopback/マイクを自動判定 (既定は loopback)。open/コールバックは共通。
+        device, is_mic = _resolve_windows_capture_device(self._pa, self._device_name)
         self._capture_rate = int(device["defaultSampleRate"])
         channels = int(device["maxInputChannels"])
         logger.info(
-            "WASAPI loopback device: [%s] %s (channels=%d, rate=%d -> %d)",
+            "WASAPI %s device: [%s] %s (channels=%d, rate=%d -> %d)",
+            "mic" if is_mic else "loopback",
             device["index"], device["name"], channels,
             self._capture_rate, GEMINI_SAMPLE_RATE,
         )

@@ -165,12 +165,11 @@ def format_status(
 
 
 def _find_loopback_device(pa, name: str | None):
-    """PyAudioWPatch で WASAPI loopback デバイスを解決する (Windows).
+    """PyAudioWPatch で WASAPI loopback デバイス (= 出力の取り込み) を解決する (Windows).
 
-    - 数字のみのとき: その loopback デバイスのインデックス指定 (同名出力が複数あるとき用。
-      `--list-devices` の番号と対応)
-    - name=None or 既定デバイス名(DEVICE_NAME) のとき: 既定出力に対応する loopback
-    - name 指定時: loopback デバイス名の部分一致
+    - 数字のみのとき: その loopback デバイスのインデックス指定 (`--list-devices` の番号と対応)
+    - それ以外 (None / 既定 DEVICE_NAME): 既定出力に対応する loopback
+    ユーザー入力は CLI で番号に限定されるため、名前(部分一致)指定は受け付けない。
     """
     import pyaudiowpatch as pyaudio
 
@@ -193,20 +192,59 @@ def _find_loopback_device(pa, name: str | None):
             f"Available (index, name): {available}. See --list-devices."
         )
 
-    use_default = (not name) or (name == DEVICE_NAME)
-    if use_default:
-        default_out = pa.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
-        for lb in loopbacks:
-            if default_out["name"] in lb["name"]:
-                return lb
-        return loopbacks[0]
-
+    # 既定: 既定出力に対応する loopback (無ければ先頭)。
+    default_out = pa.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
     for lb in loopbacks:
-        if name in lb["name"]:
+        if default_out["name"] in lb["name"]:
             return lb
-    available = [lb["name"] for lb in loopbacks]
+    return loopbacks[0]
+
+
+def _wasapi_input_devices(pa) -> list[dict]:
+    """WASAPI の通常入力(マイク)デバイス一覧を返す (loopback を除外).
+
+    `get_loopback_device_info_generator()` が返す index 群 (= 出力由来の入力) を
+    除き、WASAPI ホスト API かつ入力チャンネルを持つデバイスだけを列挙する。
+    """
+    import pyaudiowpatch as pyaudio
+
+    wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+    wasapi_index = wasapi_info["index"]
+    loopback_indexes = {lb["index"] for lb in pa.get_loopback_device_info_generator()}
+    mics: list[dict] = []
+    for i in range(pa.get_device_count()):
+        info = pa.get_device_info_by_index(i)
+        if (
+            info["maxInputChannels"] > 0
+            and info["index"] not in loopback_indexes
+            and info.get("hostApi") == wasapi_index
+        ):
+            mics.append(info)
+    return mics
+
+
+def _resolve_windows_capture_device(pa, name: str | None):
+    """Windows のキャプチャデバイスを解決する. 返り値: (device_info, is_mic).
+
+    デバイス番号は loopback / 入力で重複しない一意の index なので、番号だけで
+    出力(loopback)/入力(マイク)を自動判定する:
+    - 非数字 (None / 既定): 既定出力の loopback (is_mic=False)。
+    - 数字: loopback の index なら loopback (False)、WASAPI 入力(マイク)の index なら
+      マイク (True)。どちらでもなければエラー。
+    """
+    if not _looks_like_index(name):
+        return _find_loopback_device(pa, name), False
+
+    idx = int(name)
+    for lb in pa.get_loopback_device_info_generator():
+        if lb["index"] == idx:
+            return lb, False
+    for m in _wasapi_input_devices(pa):
+        if m["index"] == idx:
+            return m, True
     raise RuntimeError(
-        f"Loopback device matching {name!r} not found. Available: {available}"
+        f"Device index {idx} is not a WASAPI loopback or microphone input. "
+        "See --list-devices."
     )
 
 
@@ -486,11 +524,13 @@ class WindowsLoopbackSpeechSegmentCapture(_BaseSpeechSegmentCapture):
 
         self._capture_start_monotonic = time.monotonic()
         self._pa = pyaudio.PyAudio()
-        device = _find_loopback_device(self._pa, self._device_name)
+        # 番号で loopback/マイクを自動判定 (既定は loopback)。open/コールバックは共通。
+        device, is_mic = _resolve_windows_capture_device(self._pa, self._device_name)
         self._capture_rate = int(device["defaultSampleRate"])
         channels = int(device["maxInputChannels"])
         logger.info(
-            "WASAPI loopback device: [%s] %s (channels=%d, rate=%d -> %d)",
+            "WASAPI %s device: [%s] %s (channels=%d, rate=%d -> %d)",
+            "mic" if is_mic else "loopback",
             device["index"], device["name"], channels,
             self._capture_rate, self.sample_rate,
         )
