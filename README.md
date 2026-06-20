@@ -15,10 +15,11 @@
 | `openai-chat` | OpenAI 互換 Chat Completions REST API | ローカル動作でVAD処理を行い、WAVに変換した音声をLLMへ入力。Ollamaなどローカルで動くエンジンを想定していますが、エンドポイント変更で OpenAI Webサービスの利用も可です。 |
 | `mlx` (macOS のみ) | mlx-vlm + Gemma 4 (ローカル) | ローカル動作、Apple Silicon 専用 macOS ネイティブ |
 
-デフォルトのバックエンドは**両OSで `openai-realtime`**。macOS では MLX も利用可能です:
+デフォルトのバックエンドは**両OSで `openai-realtime`**。MLX は Apple Silicon の macOS でのみ利用可能です:
 
 - **Windows**: `openai-realtime` / `gemini-realtime` / `openai-chat`
-- **macOS**: `openai-realtime` / `gemini-realtime` / `openai-chat` / `mlx`
+- **macOS (Apple Silicon)**: `openai-realtime` / `gemini-realtime` / `openai-chat` / `mlx`
+- **macOS (Intel)**: `openai-realtime` / `gemini-realtime` / `openai-chat` (mlx は非対応)
 
 
 ## セットアップと起動
@@ -108,14 +109,14 @@ BlackHole 2ch
 
 ### macOS
 
-- macOS (Apple Silicon)
+- macOS (Apple Silicon 推奨。Intel Mac も可だが `mlx` バックエンドは非対応)
 - Python 3.11〜3.13 / [uv](https://docs.astral.sh/uv/)
 - [BlackHole 2ch](https://existential.audio/blackhole/) と Multi-Output Device 設定
 - バックエンド別:
   - `openai-realtime`: `OPENAI_API_KEY`
   - `gemini-realtime`: `GEMINI_API_KEY`
   - `openai-chat`: [Ollama](https://ollama.com/) 等の OpenAI 互換サーバ
-  - `mlx`: 追加不要 (初回に Gemma 4 を自動 DL)
+  - `mlx`: 追加不要 (初回に Gemma 4 を自動 DL)。**Apple Silicon 専用** (Intel Mac では使用不可。`uv sync` でも mlx 系依存はインストールされません)
 
 ## 使い方
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import platform
 import subprocess
 import sys
 import threading
@@ -117,6 +118,32 @@ def _is_windows() -> bool:
 
 def _is_macos() -> bool:
     return sys.platform == "darwin"
+
+
+def _is_apple_silicon() -> bool:
+    """mlx が動作可能な環境 (Apple Silicon の macOS) か判定する.
+
+    mlx / mlx-vlm は Apple Silicon (Metal + ユニファイドメモリ) 専用で、Intel Mac では
+    動作しない。Rosetta 下の x86_64 Python も machine()=="x86_64" となり mlx の wheel が
+    無いため、ここで False になるのは正しい (mlx を提供しない)。
+    """
+    return _is_macos() and platform.machine() == "arm64"
+
+
+def _resolve_backend_choices(
+    mlx_available: bool, openai_chat_available: bool
+) -> tuple[str, ...]:
+    """対応バックエンドの choices をプラットフォーム可用性から決定する.
+
+    - Apple Silicon macOS: 4種 (mlx 含む)
+    - Intel macOS / Windows: 3種 (openai-realtime, openai-chat, gemini-realtime)
+    - Linux など: 2種 (openai-realtime, gemini-realtime)
+    """
+    if mlx_available:
+        return ("openai-realtime", "openai-chat", "gemini-realtime", "mlx")
+    if openai_chat_available:
+        return ("openai-realtime", "openai-chat", "gemini-realtime")
+    return ("openai-realtime", "gemini-realtime")
 
 
 def _env_truthy(name: str) -> bool:
@@ -259,8 +286,12 @@ def _parse_args() -> argparse.Namespace:
     # mlx バックエンドは macOS (Apple Silicon) 専用. mlx が使えない環境では
     # mlx モデル関連オプションを登録しない (= --help に出ない & 渡すと
     # unrecognized arguments).
-    mlx_available = _is_macos()
+    # mlx は Apple Silicon の macOS 専用 (Intel Mac では mlx/mlx-vlm が動作しない)。
+    mlx_available = _is_apple_silicon()
     openai_chat_available = _is_macos() or _is_windows()
+    backend_choices = _resolve_backend_choices(mlx_available, openai_chat_available)
+    backend_default = "openai-realtime"
+    backend_help = "Translation backend (default: openai-realtime)"
 
     if mlx_available:
         description = (
@@ -270,28 +301,21 @@ def _parse_args() -> argparse.Namespace:
             "OpenAI-compatible Chat Completions, local MLX (Gemma 4), "
             "or Gemini Multimodal Live API."
         )
-        backend_choices = ("openai-realtime", "openai-chat", "gemini-realtime", "mlx")
-        backend_default = "openai-realtime"
-        backend_help = "Translation backend (default: openai-realtime)"
-    elif _is_windows():
+    elif openai_chat_available:
+        # Intel macOS / Windows: mlx 非対応。残り 3 種。
         description = (
-            "Low-latency simultaneous interpreter (Windows: OpenAI realtime, "
+            "Low-latency simultaneous interpreter (OpenAI realtime, "
             "OpenAI-compatible Chat Completions, or Gemini Live API). "
+            "On macOS the local MLX backend requires Apple Silicon. "
             "Default: English→Japanese. Use --source-lang / --target-lang "
             "(aliases: --from / --to, -s / -t) to change languages."
         )
-        backend_choices = ("openai-realtime", "openai-chat", "gemini-realtime")
-        backend_default = "openai-realtime"
-        backend_help = "Translation backend (default: openai-realtime)"
     else:
         description = (
             "Low-latency simultaneous interpreter. "
             "Default: English→Japanese. Use --source-lang / --target-lang "
             "(aliases: --from / --to, -s / -t) to change languages."
         )
-        backend_choices = ("openai-realtime", "gemini-realtime")
-        backend_default = "openai-realtime"
-        backend_help = "Translation backend"
 
     # usage/help の折り返し幅を 80 に固定 (ターミナル幅に依存させない)。
     # 長いオプションでも 1 行が 80 文字を超えないよう、メタ変数名も短くしている。
@@ -692,9 +716,10 @@ def _build_backend(
         except ImportError as e:
             raise SystemExit(
                 f"error: mlx backend unavailable ({e}). "
-                "The mlx backend requires macOS (Apple Silicon) with mlx-vlm installed. "
-                "On Windows use --backend openai-realtime or --backend openai-chat; "
-                "on Linux use --backend openai-realtime."
+                "The mlx backend requires macOS on Apple Silicon (M-series) with mlx-vlm "
+                "installed; it does not run on Intel Macs. "
+                "On Intel macOS or Windows use --backend openai-realtime or --backend "
+                "openai-chat; on Linux use --backend openai-realtime."
             )
 
         translator = GemmaAudioTranslator(
