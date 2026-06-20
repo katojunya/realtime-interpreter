@@ -139,9 +139,7 @@ uv run realtime-interpreter \
 
 ### デバイス選択 / 終了
 
-終了は `Ctrl+C`。取り込むデバイスは `--device` で指定し、一覧は `--list-devices` で確認します。
-
-`--device` は **名前(部分一致)** か **番号(`--list-devices` のインデックス)** で指定できます。名前は最初に一致したデバイスを使うため、**同名デバイスが複数ある場合は番号で一意に指定**します。macOS/Linux は「入力デバイス名」、Windows は「取り込みたい出力(ループバック)デバイス名」を指す点に注意してください。
+終了は `Ctrl+C`。取り込むデバイスは `--device <番号>` で指定し、一覧は `--list-devices` で確認します。**`--device` は `--list-devices` のインデックス番号のみ**を受け付けます(名前指定は廃止)。省略時はプラットフォーム既定(Windows=既定スピーカーの loopback / macOS=BlackHole 2ch)。
 
 #### macOS / Linux(入力デバイス)
 
@@ -154,41 +152,52 @@ Input devices selectable via --device (index: name [in channels]):
    5: MacBook Proのマイク [in=1]
 ```
 
-- 行頭の番号(`4:`)が `--device` に渡せる番号、`BlackHole 2ch` が名前。`[in=2]` は入力チャンネル数、`<- default-in` は既定入力。
+- 行頭の番号(`4:`)を `--device` に渡します。`[in=2]` は入力チャンネル数、`<- default-in` は既定入力。
 - 指定例:
-  - システム音声(BlackHole 経由・既定値): 省略可、または `--device "BlackHole 2ch"`
-  - 物理マイク: `--device "MacBook Pro"`(部分一致)
-  - 番号で指定: `--device 4`
+  - システム音声(BlackHole 経由・既定): `--device` 省略
+  - 物理マイク: `--device 5`
 - システム音声の取り込みには、OS 側で「スピーカー + BlackHole 2ch」を含む Multi-Output Device に出力をルーティングする設定が必要です(`--device` とは別の OS 設定)。
 
-#### Windows(WASAPI ループバック = 出力デバイス)
+#### Windows(WASAPI: 出力 loopback / マイク入力)
+
+`--list-devices` は **出力(loopback の取り込み対象)と入力(マイク)の両方**を表示します。`--device <番号>` で選び、**番号から出力/入力を自動判定**します(番号は両者で一意):
 
 ```
 C:\> uv run realtime-interpreter --list-devices
-Loopback capture targets for --device (WASAPI):
+Audio devices (Windows, WASAPI)
 
-  [10] リモート オーディオ [Loopback] (in=2, rate=44100)  <- matches default output (used when --device omitted)
-  [11] EVF3285 [Loopback] (in=2, rate=44100)
-  [12] EVF3285 [Loopback] (in=2, rate=44100)
+Output devices — system audio via loopback (default). Select with --device <index>:
+
+  [10] リモート オーディオ  rate=44100   <- default (used when --device omitted)
+  [11] EVF3285  rate=44100
+  [12] EVF3285  rate=44100
+
+Input devices — microphones. Select with --device <index>:
+
+  [ 1] マイク (Realtek(R) Audio)  in=2  rate=48000   <- default mic
+  [ 6] USB マイク  in=1  rate=44100
+
+Tips:
+  - Pass a device index to --device. A number auto-selects output (loopback)
+    or microphone; numbers are unique across both lists.
+  - Omit --device to capture the default output (speaker).
 ```
 
-- Windows は仮想ドライバ不要で、**出力(スピーカー)をループバック録音**します。一覧は「録音対象にできる出力デバイス」です。
-- 指定例:
-  - 既定スピーカー(`<- matches default output`): `--device` 省略
-  - 特定の出力: `--device "EVF3285"`(名前・部分一致)
-  - **同名が複数**(上記 `[11]` / `[12]`)あるときは**番号で区別**: `--device 12`
+- システム音声(既定): `--device` 省略、または出力の番号(例 `--device 10`)。
+- 特定の出力 / **同名**(`[11]` / `[12]`)の区別: 番号で指定(`--device 12`)。
+- マイク入力: 入力の番号(例 `--device 6`)。番号で自動的にマイク取り込みになります。
 
-#### 番号指定の注意 / 互換性
+#### 番号指定の注意
 
 - 番号はデバイスの抜き差しで変わり得るため、**`--list-devices` 直後の番号**を使ってください。
-- `--device` の値が**数字のみ**のときに番号(インデックス)として解釈します。英字を含む名前(例 `"EVF3285"` / `"BlackHole 2ch"`)は従来どおり名前一致で動作するため、**既存の指定方法への影響はありません**(破壊的変更は「数字のみの値」の解釈のみ)。
+- `--device` は**番号のみ**(名前指定は不可)。省略時は既定(Windows=スピーカー loopback / macOS=BlackHole)。
 
 ### オプション
 
 | フラグ | 説明 | デフォルト | 対象 |
 |---|---|---|---|
 | `--backend` | `openai-realtime` / `gemini-realtime` / `openai-chat` / `mlx` | `openai-realtime` | 共通 |
-| `--device` | 取り込みデバイス: 名前 (部分一致) または番号 (`--list-devices` のインデックス)。同名デバイスは番号で区別 | `BlackHole 2ch` (macOS) | 共通 |
+| `--device` | 取り込みデバイスの**番号**(`--list-devices` のインデックス)。Windows は番号で出力(loopback)/入力(マイク)を自動判定。省略で既定(Win=スピーカー / mac=BlackHole) | (既定デバイス) | 共通 |
 | `--list-devices` | オーディオデバイス一覧を表示して終了 | — | 共通 |
 | `--device-check` | 起動時に出力デバイスのルーティングを確認 (macOS)。デフォルトはスキップ | (off) | 共通 |
 | `--source-lang` / `--from` / `-s` | 音声の言語 (ISO 639-1) | `en` | 共通 |
