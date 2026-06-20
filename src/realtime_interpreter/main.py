@@ -88,6 +88,9 @@ from realtime_interpreter.backends.openai_chat import (
 )
 from realtime_interpreter.renderer import StreamingRenderer
 from realtime_interpreter.session_logger import SessionLogger, format_offset
+# 話者ダイアライザの実体 (resemblyzer) は diarizer 内で遅延 import されるため、
+# この定数 import は diarize 依存が無い環境でも安全 (numpy のみ)。
+from realtime_interpreter.diarizer import DEFAULT_SIMILARITY_THRESHOLD
 from realtime_interpreter.summarizer import (
     DEFAULT_OPENAI_SUMMARY_MODEL,
     OpenAIChatSummarizer,
@@ -474,6 +477,26 @@ def _parse_args() -> argparse.Namespace:
         metavar="INDEX",
         help=device_help,
     )
+    parser.add_argument(
+        "--diarize",
+        action="store_true",
+        help=(
+            "[experimental] Label output by speaker (S1/S2…) using local speaker "
+            "diarization. Sequential turns only (no overlapping-speech separation). "
+            "Supported on mlx / openai-chat backends. Requires: uv sync --extra diarize."
+        ),
+    )
+    parser.add_argument(
+        "--diarize-threshold",
+        type=float,
+        default=DEFAULT_SIMILARITY_THRESHOLD,
+        metavar="COS",
+        help=(
+            "Cosine-similarity threshold for the same speaker (0..1). Higher = split "
+            "more readily into new speakers; lower = merge more. "
+            f"Default {DEFAULT_SIMILARITY_THRESHOLD}. Only used with --diarize."
+        ),
+    )
 
     # 共通の言語切替フラグ. ISO 639-1 2文字コード.
     parser.add_argument(
@@ -814,6 +837,18 @@ def _print_languages() -> None:
     print("Use the openai backend with an unsupported target → API will error.")
 
 
+def _build_diarizer(args: argparse.Namespace):
+    """--diarize 有効時に既定の話者ダイアライザを生成する (無効なら None).
+
+    realtime 系には呼ばれない (ローカル区切り音声が無く非対応)。
+    """
+    if not getattr(args, "diarize", False):
+        return None
+    from realtime_interpreter.diarizer import make_default_diarizer
+
+    return make_default_diarizer(threshold=args.diarize_threshold)
+
+
 def _build_backend(
     args: argparse.Namespace,
 ) -> tuple[
@@ -823,6 +858,18 @@ def _build_backend(
     summary_enabled = args.summary_interval_seconds > 0
     src = normalize_language_code(args.source_lang)
     tgt = normalize_language_code(args.target_lang)
+
+    # 話者ダイアライゼーションは per-segment 音声を持つ mlx / openai-chat のみ対応。
+    # realtime 系はローカル区切り音声が無いため、指定されても無効化して警告する。
+    if getattr(args, "diarize", False) and args.backend in (
+        "openai-realtime",
+        "gemini-realtime",
+    ):
+        print(
+            f"warning: --diarize is not supported on {args.backend} "
+            "(no local per-utterance audio); ignoring.",
+            file=sys.stderr,
+        )
 
     # sounddevice は Windows では import しない (ARM64 で PortAudio DLL がロードできず、
     # かつ Windows の各バックエンドは PyAudioWPatch ベースのキャプチャを使うため不要)。
@@ -864,6 +911,7 @@ def _build_backend(
             device_name=args.device,
             end_silence_ms=args.end_silence_ms,
             max_segment_seconds=args.max_segment_seconds,
+            diarizer=_build_diarizer(args),
         )
         summarizer = (
             Summarizer(translator, source_lang=src, target_lang=tgt)
@@ -959,6 +1007,7 @@ def _build_backend(
                 translator=translator,
                 end_silence_ms=args.end_silence_ms,
                 max_segment_seconds=args.max_segment_seconds,
+                diarizer=_build_diarizer(args),
             )
         except ImportError as e:
             raise SystemExit(
@@ -1135,6 +1184,11 @@ def _collect_settings(
     if endpoint:
         pairs.append(("endpoint", endpoint))
     pairs.append(("segmentation", seg))
+    if getattr(args, "diarize", False) and args.backend in ("mlx", "openai-chat"):
+        pairs.append((
+            "diarization",
+            f"on (experimental, sequential, local embedding, threshold={args.diarize_threshold})",
+        ))
     pairs.append(("summary", summ))
     pairs.append(("max_session", max_session))
     pairs.append(("tls", "OS certificate store (truststore)" if args.system_certs else "bundled CAs"))
@@ -1349,8 +1403,8 @@ def main() -> None:
                         continue
 
                     # 確定セグメント: 永続表示・ログ・要約バッファ反映
-                    renderer.commit(ts, seg.source, seg.target)
-                    session_logger.log_segment(ts, seg.source, seg.target)
+                    renderer.commit(ts, seg.source, seg.target, speaker=seg.speaker)
+                    session_logger.log_segment(ts, seg.source, seg.target, speaker=seg.speaker)
                     if summarizer is not None and seg.source.strip():
                         source_buffer.append(
                             (seg.start_offset_seconds, seg.source.strip())
@@ -1392,9 +1446,10 @@ def main() -> None:
                     seg = backend._segment_queue.get_nowait()
                     if not seg.is_partial:
                         ts = format_offset(seg.start_offset_seconds)
-                        session_logger.log_segment(ts, seg.source, seg.target)
-                        print(f"[{ts}] {seg.source.strip()}")
-                        print(f"[{ts}] {seg.target.strip()}\n")
+                        session_logger.log_segment(ts, seg.source, seg.target, speaker=seg.speaker)
+                        prefix = f"[{seg.speaker}] " if seg.speaker else ""
+                        print(f"[{ts}] {prefix}{seg.source.strip()}")
+                        print(f"[{ts}] {prefix}{seg.target.strip()}\n")
             except Exception:
                 pass
 

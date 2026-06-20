@@ -332,9 +332,12 @@ class OpenAIChatBackend:
         translator: OpenAIChatAudioTranslator,
         end_silence_ms: int = END_SILENCE_MS,
         max_segment_seconds: float = MAX_SEGMENT_SECONDS,
+        diarizer: object | None = None,
     ) -> None:
         self.translator = translator
         self._comm_cb: Callable[[object], None] | None = None
+        # 話者ダイアライゼーション (--diarize). None なら無効。
+        self._diarizer = diarizer
         self._repetition_guard = _RepetitionGuard()
         if sys.platform == "win32":
             self._capture = WindowsLoopbackSpeechSegmentCapture(
@@ -412,12 +415,18 @@ class OpenAIChatBackend:
                     result.source,
                 )
                 continue
+            speaker = (
+                self._diarizer.assign(segment.audio, SAMPLE_RATE)
+                if self._diarizer is not None
+                else None
+            )
             yield TranslatedSegment(
                 start_offset_seconds=segment.start_offset_seconds,
                 duration_seconds=segment.duration_seconds,
                 source=result.source,
                 target=result.target,
                 is_partial=False,
+                speaker=speaker,
             )
 
 

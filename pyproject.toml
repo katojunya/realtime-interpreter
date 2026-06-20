@@ -34,6 +34,13 @@ dependencies = [
     "soundfile>=0.12; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
+[project.optional-dependencies]
+# 話者ダイアライゼーション (--diarize, 実験的 DIALIZATION-1). 既定では入れない。
+# `uv sync --extra diarize` で導入。resemblyzer は話者埋め込み用 (torch を間接的に伴う)。
+diarize = [
+    "resemblyzer>=0.1",
+]
+
 [project.scripts]
 realtime-interpreter = "realtime_interpreter.main:main"
 

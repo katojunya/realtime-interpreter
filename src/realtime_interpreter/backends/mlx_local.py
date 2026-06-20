@@ -12,7 +12,7 @@ from typing import Iterator, Callable
 
 from rich.text import Text
 
-from realtime_interpreter.audio import SpeechSegmentCapture
+from realtime_interpreter.audio import SAMPLE_RATE, SpeechSegmentCapture
 from realtime_interpreter.backends.base import TranslatedSegment
 from realtime_interpreter.translator import GemmaAudioTranslator
 
@@ -29,9 +29,12 @@ class LocalMLXBackend:
         device_name: str,
         end_silence_ms: int,
         max_segment_seconds: float,
+        diarizer: object | None = None,
     ) -> None:
         self.translator = translator
         self._comm_cb: Callable[[object], None] | None = None
+        # 話者ダイアライゼーション (--diarize). None なら無効。
+        self._diarizer = diarizer
         self._capture = SpeechSegmentCapture(
             sd_module=sd_module,
             device_name=device_name,
@@ -96,10 +99,16 @@ class LocalMLXBackend:
             # 翻訳完了 → 次の発話待ち (Listening) へ戻す。
             if self._comm_cb:
                 self._comm_cb(self._comm_listening())
+            speaker = (
+                self._diarizer.assign(segment.audio, SAMPLE_RATE)
+                if self._diarizer is not None
+                else None
+            )
             yield TranslatedSegment(
                 start_offset_seconds=segment.start_offset_seconds,
                 duration_seconds=segment.duration_seconds,
                 source=result.source,
                 target=result.target,
                 is_partial=False,
+                speaker=speaker,
             )

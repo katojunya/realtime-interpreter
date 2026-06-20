@@ -211,11 +211,16 @@ class StreamingRenderer:
             self._current_target = target
             self._refresh()
 
-    def commit(self, ts: str, source: str, target: str) -> None:
+    def commit(
+        self, ts: str, source: str, target: str, speaker: str | None = None
+    ) -> None:
         """ターン確定: 永続表示エリアに昇格させ、進行中をクリア.
 
         Live の上に console.print することで、確定した行が Live エリアの上に
         積み上がる (Rich Live の標準挙動). 進行中表示はクリアされ、次のターンを待つ。
+
+        speaker (話者ラベル) が与えられた場合は各行の本文に `[S1] ` を前置する
+        (話者ダイアライゼーション有効時)。
 
         実装メモ:
         - `Text(...)` で渡すことで `[{ts}]` をマークアップとして解釈させない
@@ -226,6 +231,11 @@ class StreamingRenderer:
         """
         src = source.strip()
         tgt = target.strip()
+        if speaker:
+            if src:
+                src = f"[{speaker}] {src}"
+            if tgt:
+                tgt = f"[{speaker}] {tgt}"
         with self._lock:
             if src:
                 # [mm:ss]=緑 / source 転写=グレー の append-only 出力

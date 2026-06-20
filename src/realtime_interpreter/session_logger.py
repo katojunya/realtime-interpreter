@@ -55,12 +55,18 @@ class SessionLogger:
         """セッション開始からの経過時間を mm:ss で返す."""
         return format_offset(time.monotonic() - self._start)
 
-    def log_segment(self, ts: str, source: str, target: str) -> None:
-        """1 セグメントの source 転写と target 訳をペアで記録."""
+    def log_segment(
+        self, ts: str, source: str, target: str, speaker: str | None = None
+    ) -> None:
+        """1 セグメントの source 転写と target 訳をペアで記録.
+
+        speaker (話者ラベル) があれば各行に `[S1] ` を前置する。
+        """
+        prefix = f"[{speaker}] " if speaker else ""
         if source.strip():
-            self._fh.write(f"[{ts}] {source.strip()}\n")
+            self._fh.write(f"[{ts}] {prefix}{source.strip()}\n")
         if target.strip():
-            self._fh.write(f"[{ts}] {target.strip()}\n")
+            self._fh.write(f"[{ts}] {prefix}{target.strip()}\n")
         if source.strip() or target.strip():
             self._fh.write("\n")
 

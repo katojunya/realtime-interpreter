@@ -37,6 +37,8 @@ class TranslatedSegment:
     source: str
     target: str
     is_partial: bool = False
+    # 話者ラベル (S1/S2…). 話者ダイアライゼーション (--diarize) 有効時のみ設定。
+    speaker: str | None = None
 
 
 @dataclass
