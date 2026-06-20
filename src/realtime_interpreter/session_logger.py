@@ -26,18 +26,30 @@ def format_offset(seconds: float) -> str:
 class SessionLogger:
     """1 セッション分のログをファイルに記録する."""
 
-    def __init__(self, log_dir: Path | str = "logs", timestamp: str | None = None) -> None:
+    def __init__(
+        self,
+        log_dir: Path | str = "logs",
+        timestamp: str | None = None,
+        settings: list[tuple[str, str]] | None = None,
+    ) -> None:
         self._dir = Path(log_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         ts = timestamp or dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.path = self._dir / f"session_{ts}.log"
         self._start = time.monotonic()
+        # 起動設定 (backend/モデル/言語/デバイス 等) を (label, value) で受け取り、
+        # ヘッダにコメントとして記録する。API キー等の機密は呼び出し側で含めないこと。
+        self._settings = settings or []
         self._fh = self.path.open("w", encoding="utf-8", buffering=1)
         self._write_header()
 
     def _write_header(self) -> None:
         now = dt.datetime.now().isoformat(timespec="seconds")
-        self._fh.write(f"# realtime-interpreter session\n# started: {now}\n\n")
+        self._fh.write("# realtime-interpreter session\n")
+        rows = [("started", now), *self._settings]
+        for label, value in rows:
+            self._fh.write(f"# {(label + ':'):<14}{value}\n")
+        self._fh.write("\n")
 
     def elapsed(self) -> str:
         """セッション開始からの経過時間を mm:ss で返す."""
@@ -64,7 +76,7 @@ class SessionLogger:
 
     def close(self) -> None:
         if not self._fh.closed:
-            self.log_event("session ended")
+            self.log_event(f"session ended (duration {self.elapsed()})")
             self._fh.close()
 
     def __enter__(self) -> SessionLogger:
