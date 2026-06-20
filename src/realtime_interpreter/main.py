@@ -344,14 +344,25 @@ def _parse_args() -> argparse.Namespace:
             "Multi-Output Device if needed (macOS). Skipped by default."
         ),
     )
+    # --device の既定値は DEVICE_NAME ("BlackHole 2ch")。macOS では実デバイス名だが、
+    # Windows ではセンチネルで「既定の出力(スピーカー)を loopback 取り込み」を意味する。
+    # そのため help はプラットフォーム別にし、Windows で BlackHole を既定表示しない。
+    if _is_windows():
+        device_help = (
+            "Capture device (WASAPI loopback): loopback device name (substring) or "
+            "index number from --list-devices. Use the number to disambiguate "
+            "identically-named devices. Omit to capture the default output (speaker)."
+        )
+    else:
+        device_help = (
+            "Capture device: name substring or index number from --list-devices. "
+            "Use the number to disambiguate identically-named devices. "
+            f"(default: {DEVICE_NAME!r})"
+        )
     parser.add_argument(
         "--device",
         default=DEVICE_NAME,
-        help=(
-            f"Capture device: name substring or index number from --list-devices "
-            f"(use the number to disambiguate identically-named devices). "
-            f"(default: {DEVICE_NAME!r})"
-        ),
+        help=device_help,
     )
 
     # 共通の言語切替フラグ. ISO 639-1 2文字コード.
