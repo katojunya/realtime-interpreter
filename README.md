@@ -396,6 +396,10 @@ uv run realtime-interpreter --backend openai-realtime --system-certs
 - リアルタイム両バックエンドは入力文字起こしと訳が別ストリームのため、行頭の対応が 1 セグメント程度ずれることがある
 - セグメント完結まで確定行は表示されない設計 (確定済み出力のストリームを目的とする)
 - 再接続 (openai-realtime) の瞬間に 1 フレーズ程度欠落することがある
+- 中国語の字体(簡体字/繁体字)指定に制限がある(リアルタイム2バックエンド):
+  - `openai-realtime` ([gpt-realtime-translate](https://developers.openai.com/cookbook/examples/voice_solutions/realtime_translation_guide)) は出力言語として「中国語」を **1 種類しか提供せず、簡体字/繁体字を選べない**(実質 簡体字/標準中国語)。
+  - `gemini-realtime` ([Live translation](https://ai.google.dev/gemini-api/docs/live-api/live-translate)) は `zh-Hans`(簡体字)/ `zh-Hant`(繁体字)の**スクリプトサブタグ**で区別できるが、`zh-cn` / `zh-tw` / `zh-hk` の**地域コードには非対応**。
+  - 本アプリは `--target-lang` の値(例 `zh-tw`)を**小文字化してそのまま渡す**だけで、Gemini の `zh-Hans`/`zh-Hant` へマップしない。そのため台湾・香港向けの**繁体字を意図しても簡体字(またはデフォルト)で出力されることがある**。Gemini で繁体字を確実に出すには、アプリ側で `zh-Hant`(大文字小文字を保持)へマッピングする対応が必要(openai-realtime は繁体字自体が非対応)。
 
 ## ライセンス
 
