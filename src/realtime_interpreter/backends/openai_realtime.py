@@ -36,7 +36,14 @@ from rich.text import Text
 
 import numpy as np
 
-from realtime_interpreter.audio import DEVICE_NAME, _compute_dbfs, format_status
+from realtime_interpreter.audio import (
+    DEVICE_NAME,
+    _compute_dbfs,
+    _find_loopback_device,
+    _input_channels,
+    find_device as _find_input_device,
+    format_status,
+)
 from realtime_interpreter.backends.base import TranslatedSegment, BackendState
 from realtime_interpreter.i18n import DEFAULT_SOURCE, DEFAULT_TARGET
 
@@ -127,15 +134,6 @@ def _first_complete_sentence_end_en(text: str) -> int | None:
     return None
 
 
-def _find_input_device(name: str, sd_module: ModuleType) -> int:
-    devices = sd_module.query_devices()
-    for index, device in enumerate(devices):
-        if name in device["name"] and device["max_input_channels"] > 0:
-            return index
-    available = [d["name"] for d in devices]
-    raise RuntimeError(f"Device '{name}' not found. Available: {available}")
-
-
 def _is_windows() -> bool:
     return sys.platform == "win32"
 
@@ -162,42 +160,6 @@ def _resample_linear(mono: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarr
     x_old = np.arange(mono.size, dtype=np.float64)
     x_new = np.linspace(0.0, mono.size - 1, n_out)
     return np.interp(x_new, x_old, mono).astype(np.float32)
-
-
-def _find_loopback_device(pa, name: str | None):
-    """PyAudioWPatch で WASAPI loopback デバイスを解決する (Windows).
-
-    - name=None or 既定デバイス名(DEVICE_NAME) のとき: 既定出力に対応する loopback
-    - name 指定時: loopback デバイス名の部分一致
-
-    Returns: PyAudioWPatch の device info dict
-    """
-    import pyaudiowpatch as pyaudio
-
-    wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-    loopbacks = list(pa.get_loopback_device_info_generator())
-    if not loopbacks:
-        raise RuntimeError(
-            "No WASAPI loopback devices found. This environment cannot capture "
-            "system audio via loopback."
-        )
-
-    use_default = (not name) or (name == DEVICE_NAME)
-    if use_default:
-        default_out = pa.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
-        for lb in loopbacks:
-            if default_out["name"] in lb["name"]:
-                return lb
-        # 既定出力に対応する loopback が無ければ先頭を採用
-        return loopbacks[0]
-
-    for lb in loopbacks:
-        if name in lb["name"]:
-            return lb
-    available = [lb["name"] for lb in loopbacks]
-    raise RuntimeError(
-        f"Loopback device matching {name!r} not found. Available: {available}"
-    )
 
 
 @dataclass
@@ -473,7 +435,7 @@ class OpenAIRealtimeBackend:
         self._stream = self._sd.InputStream(
             device=self._device_index,
             samplerate=OPENAI_SAMPLE_RATE,
-            channels=2,
+            channels=_input_channels(self._sd, self._device_index),
             dtype="float32",
             callback=self._audio_callback,
         )

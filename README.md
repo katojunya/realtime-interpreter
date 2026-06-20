@@ -139,14 +139,56 @@ uv run realtime-interpreter \
 
 ### デバイス選択 / 終了
 
-終了は `Ctrl+C`。Windows ではデフォルトスピーカーの音を WASAPI ループバックで取り込みます。別の出力デバイスを取り込むには `--device "<出力デバイス名>"`、一覧は `--list-devices`。
+終了は `Ctrl+C`。取り込むデバイスは `--device` で指定し、一覧は `--list-devices` で確認します。
+
+`--device` は **名前(部分一致)** か **番号(`--list-devices` のインデックス)** で指定できます。名前は最初に一致したデバイスを使うため、**同名デバイスが複数ある場合は番号で一意に指定**します。macOS/Linux は「入力デバイス名」、Windows は「取り込みたい出力(ループバック)デバイス名」を指す点に注意してください。
+
+#### macOS / Linux(入力デバイス)
+
+```
+$ uv run realtime-interpreter --list-devices
+Input devices selectable via --device (index: name [in channels]):
+
+   3: Cisco Desk Camera 4K [in=2]
+   4: BlackHole 2ch [in=2]  <- default-in
+   5: MacBook Proのマイク [in=1]
+```
+
+- 行頭の番号(`4:`)が `--device` に渡せる番号、`BlackHole 2ch` が名前。`[in=2]` は入力チャンネル数、`<- default-in` は既定入力。
+- 指定例:
+  - システム音声(BlackHole 経由・既定値): 省略可、または `--device "BlackHole 2ch"`
+  - 物理マイク: `--device "MacBook Pro"`(部分一致)
+  - 番号で指定: `--device 4`
+- システム音声の取り込みには、OS 側で「スピーカー + BlackHole 2ch」を含む Multi-Output Device に出力をルーティングする設定が必要です(`--device` とは別の OS 設定)。
+
+#### Windows(WASAPI ループバック = 出力デバイス)
+
+```
+C:\> uv run realtime-interpreter --list-devices
+Loopback capture targets for --device (WASAPI):
+
+  [10] リモート オーディオ [Loopback] (in=2, rate=44100)  <- matches default output (used when --device omitted)
+  [11] EVF3285 [Loopback] (in=2, rate=44100)
+  [12] EVF3285 [Loopback] (in=2, rate=44100)
+```
+
+- Windows は仮想ドライバ不要で、**出力(スピーカー)をループバック録音**します。一覧は「録音対象にできる出力デバイス」です。
+- 指定例:
+  - 既定スピーカー(`<- matches default output`): `--device` 省略
+  - 特定の出力: `--device "EVF3285"`(名前・部分一致)
+  - **同名が複数**(上記 `[11]` / `[12]`)あるときは**番号で区別**: `--device 12`
+
+#### 番号指定の注意 / 互換性
+
+- 番号はデバイスの抜き差しで変わり得るため、**`--list-devices` 直後の番号**を使ってください。
+- `--device` の値が**数字のみ**のときに番号(インデックス)として解釈します。英字を含む名前(例 `"EVF3285"` / `"BlackHole 2ch"`)は従来どおり名前一致で動作するため、**既存の指定方法への影響はありません**(破壊的変更は「数字のみの値」の解釈のみ)。
 
 ### オプション
 
 | フラグ | 説明 | デフォルト | 対象 |
 |---|---|---|---|
 | `--backend` | `openai-realtime` / `gemini-realtime` / `openai-chat` / `mlx` | `openai-realtime` | 共通 |
-| `--device` | 入力/取り込みデバイス名 (部分一致) | `BlackHole 2ch` (macOS) | 共通 |
+| `--device` | 取り込みデバイス: 名前 (部分一致) または番号 (`--list-devices` のインデックス)。同名デバイスは番号で区別 | `BlackHole 2ch` (macOS) | 共通 |
 | `--list-devices` | オーディオデバイス一覧を表示して終了 | — | 共通 |
 | `--device-check` | 起動時に出力デバイスのルーティングを確認 (macOS)。デフォルトはスキップ | (off) | 共通 |
 | `--source-lang` / `--from` / `-s` | 音声の言語 (ISO 639-1) | `en` | 共通 |

@@ -52,14 +52,47 @@ class SpeechSegment:
     duration_seconds: float
 
 
+def _looks_like_index(name: str | None) -> bool:
+    """`--device` の値が数字のみ (= インデックス指定) かを判定する.
+
+    同名デバイスが複数あると名前の部分一致では区別できないため、`--list-devices` に
+    出る番号を直接渡せるようにする。数字のみのときだけインデックスとして扱う。
+    """
+    return bool(name) and str(name).strip().isdigit()
+
+
 def find_device(name: str, sd_module: ModuleType) -> int:
-    """デバイス名で入力デバイスを検索しインデックスを返す."""
+    """名前(部分一致)または数字インデックスで入力デバイスを解決する.
+
+    数字のみのときは query_devices() のインデックス指定として扱う (同名デバイスが
+    複数あるときに一意指定するため。`--list-devices` の番号と対応)。それ以外は
+    従来どおり名前の部分一致で、最初に一致した入力デバイスを返す。
+    """
     devices = sd_module.query_devices()
+    if _looks_like_index(name):
+        idx = int(name)
+        if 0 <= idx < len(devices) and devices[idx]["max_input_channels"] > 0:
+            return idx
+        raise RuntimeError(
+            f"Device index {idx} is not a valid input device "
+            f"(must be 0..{len(devices) - 1} with input channels). See --list-devices."
+        )
     for index, device in enumerate(devices):
         if name in device["name"] and device["max_input_channels"] > 0:
             return index
     available = [d["name"] for d in devices]
     raise RuntimeError(f"Device '{name}' not found. Available: {available}")
+
+
+def _input_channels(sd_module: ModuleType, device_index: int) -> int:
+    """開くべき入力チャンネル数 (最大 2) を返す.
+
+    モノラル機 (max_input_channels==1) を channels=2 で開くと PortAudio が
+    "Invalid number of channels" で失敗する。デバイスの対応数に合わせて開き、
+    コールバックの `_to_mono` が 1ch/2ch どちらもモノラル化するので下流は不変。
+    """
+    max_in = int(sd_module.query_devices(device_index)["max_input_channels"])
+    return min(2, max_in) if max_in > 0 else 1
 
 
 def _to_mono(samples: np.ndarray) -> np.ndarray:
@@ -134,6 +167,8 @@ def format_status(
 def _find_loopback_device(pa, name: str | None):
     """PyAudioWPatch で WASAPI loopback デバイスを解決する (Windows).
 
+    - 数字のみのとき: その loopback デバイスのインデックス指定 (同名出力が複数あるとき用。
+      `--list-devices` の番号と対応)
     - name=None or 既定デバイス名(DEVICE_NAME) のとき: 既定出力に対応する loopback
     - name 指定時: loopback デバイス名の部分一致
     """
@@ -145,6 +180,17 @@ def _find_loopback_device(pa, name: str | None):
         raise RuntimeError(
             "No WASAPI loopback devices found. This environment cannot capture "
             "system audio via loopback."
+        )
+
+    if _looks_like_index(name):
+        idx = int(name)
+        for lb in loopbacks:
+            if lb["index"] == idx:
+                return lb
+        available = [(lb["index"], lb["name"]) for lb in loopbacks]
+        raise RuntimeError(
+            f"Device index {idx} is not a WASAPI loopback capture target. "
+            f"Available (index, name): {available}. See --list-devices."
         )
 
     use_default = (not name) or (name == DEVICE_NAME)
@@ -375,7 +421,7 @@ class SpeechSegmentCapture(_BaseSpeechSegmentCapture):
         self._stream = self._sd.InputStream(
             device=self._device_index,
             samplerate=self.sample_rate,
-            channels=2,
+            channels=_input_channels(self._sd, self._device_index),
             dtype="float32",
             callback=self._callback,
         )

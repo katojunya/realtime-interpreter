@@ -24,7 +24,14 @@ from rich.text import Text
 
 import numpy as np
 
-from realtime_interpreter.audio import DEVICE_NAME, _compute_dbfs, format_status
+from realtime_interpreter.audio import (
+    DEVICE_NAME,
+    _compute_dbfs,
+    _find_loopback_device,
+    _input_channels,
+    find_device as _find_input_device,
+    format_status,
+)
 from realtime_interpreter.backends.base import TranslatedSegment, BackendState
 from realtime_interpreter.i18n import DEFAULT_SOURCE, DEFAULT_TARGET, language_name
 
@@ -55,38 +62,6 @@ def _resample_linear(mono: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarr
     x_old = np.arange(mono.size, dtype=np.float64)
     x_new = np.linspace(0.0, mono.size - 1, n_out)
     return np.interp(x_new, x_old, mono).astype(np.float32)
-
-
-def _find_input_device(name: str, sd_module: ModuleType) -> int:
-    devices = sd_module.query_devices()
-    for index, device in enumerate(devices):
-        if name in device["name"] and device["max_input_channels"] > 0:
-            return index
-    available = [d["name"] for d in devices]
-    raise RuntimeError(f"Device '{name}' not found. Available: {available}")
-
-
-def _find_loopback_device(pa, name: str | None):
-    import pyaudiowpatch as pyaudio
-
-    wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-    loopbacks = list(pa.get_loopback_device_info_generator())
-    if not loopbacks:
-        raise RuntimeError("No WASAPI loopback devices found.")
-
-    use_default = (not name) or (name == DEVICE_NAME)
-    if use_default:
-        default_out = pa.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
-        for lb in loopbacks:
-            if default_out["name"] in lb["name"]:
-                return lb
-        return loopbacks[0]
-
-    for lb in loopbacks:
-        if name in lb["name"]:
-            return lb
-    available = [lb["name"] for lb in loopbacks]
-    raise RuntimeError(f"Loopback device matching {name!r} not found. Available: {available}")
 
 
 @dataclass
@@ -368,7 +343,7 @@ class GeminiRealtimeBackend:
         self._stream = self._sd.InputStream(
             device=self._device_index,
             samplerate=GEMINI_SAMPLE_RATE,
-            channels=2,
+            channels=_input_channels(self._sd, self._device_index),
             dtype="float32",
             callback=self._audio_callback,
         )
