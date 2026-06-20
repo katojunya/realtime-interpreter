@@ -202,7 +202,8 @@ def _list_devices() -> None:
                 )
             print()
             print("On Windows, system audio is captured via WASAPI loopback.")
-            print("Omit --device to loopback the default speaker, or pass a loopback device name.")
+            print("Omit --device to loopback the default speaker, or pass a loopback device")
+            print("name or its index number above (use the number for identical names).")
         finally:
             pa.terminate()
         return
@@ -224,7 +225,8 @@ def _list_devices() -> None:
     if not found:
         print("  (no input-capable devices found)")
     print()
-    print("Pass a device name (substring match) to --device to choose the capture input.")
+    print("Pass a device name (substring match) or the index number above to --device")
+    print("to choose the capture input. Use the number to disambiguate identical names.")
     print("On macOS, capture system audio via BlackHole 2ch (a Multi-Output Device routes")
     print("speaker audio into BlackHole so this program can read it as an input).")
 
@@ -342,10 +344,25 @@ def _parse_args() -> argparse.Namespace:
             "Multi-Output Device if needed (macOS). Skipped by default."
         ),
     )
+    # --device の既定値は DEVICE_NAME ("BlackHole 2ch")。macOS では実デバイス名だが、
+    # Windows ではセンチネルで「既定の出力(スピーカー)を loopback 取り込み」を意味する。
+    # そのため help はプラットフォーム別にし、Windows で BlackHole を既定表示しない。
+    if _is_windows():
+        device_help = (
+            "Capture device (WASAPI loopback): loopback device name (substring) or "
+            "index number from --list-devices. Use the number to disambiguate "
+            "identically-named devices. Omit to capture the default output (speaker)."
+        )
+    else:
+        device_help = (
+            "Capture device: name substring or index number from --list-devices. "
+            "Use the number to disambiguate identically-named devices. "
+            f"(default: {DEVICE_NAME!r})"
+        )
     parser.add_argument(
         "--device",
         default=DEVICE_NAME,
-        help=f"Audio input device name (default: {DEVICE_NAME!r})",
+        help=device_help,
     )
 
     # 共通の言語切替フラグ. ISO 639-1 2文字コード.
