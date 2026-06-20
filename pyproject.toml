@@ -24,11 +24,14 @@ dependencies = [
     # --- Windows only: WASAPI loopback capture (sounddevice has no loopback support) ---
     "pyaudiowpatch>=0.2.12; sys_platform == 'win32'",
     # --- local VAD backends (mlx / openai-chat) ---
+    # openai-chat は Intel macOS でも使うため arm64 限定にしない (darwin 全体 + win32)。
     "silero-vad-lite>=0.2.1; sys_platform == 'darwin' or sys_platform == 'win32'",
-    # --- mlx backend only (macOS / Apple Silicon) ---
-    "mlx-vlm>=0.1.20; sys_platform == 'darwin'",
-    "librosa>=0.10; sys_platform == 'darwin'",
-    "soundfile>=0.12; sys_platform == 'darwin'",
+    # --- mlx backend only (Apple Silicon macOS) ---
+    # mlx は Apple Silicon 専用。Intel Mac には wheel が無く uv sync が失敗するため、
+    # platform_machine == 'arm64' で限定する (mlx-vlm の間接依存 librosa/soundfile も同様)。
+    "mlx-vlm>=0.1.20; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "librosa>=0.10; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "soundfile>=0.12; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [project.scripts]
