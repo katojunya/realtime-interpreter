@@ -275,6 +275,19 @@ def _macos_input_label(device_name: str) -> str | None:
         return None
 
 
+def _capture_label(device_name: str) -> str:
+    """キャプチャ対象を "[index] name" 形式で返す (ログ/表示用、解決失敗時はフォールバック)."""
+    if _is_windows():
+        resolved = _windows_capture_label(device_name)
+        if resolved is not None:
+            kind, idx, name = resolved
+            return f"[{idx}] {name} ({kind})"
+        if not device_name or device_name == DEVICE_NAME:
+            return "default output (speaker)"
+        return f"device #{device_name}"
+    return _macos_input_label(device_name) or device_name
+
+
 def _list_devices() -> None:
     """`--device <番号>` に指定できるデバイスを表示する.
 
@@ -1039,6 +1052,95 @@ def _emit_settings(args: argparse.Namespace) -> None:
         )
 
 
+def _collect_settings(
+    args: argparse.Namespace, backend: TranslationBackend
+) -> list[tuple[str, str]]:
+    """セッションログのヘッダに記録する起動設定を (label, value) で返す.
+
+    API キー等の機密は**含めない**。backend は mlx の解決済みモデル ID 取得に使う。
+    """
+    src = normalize_language_code(args.source_lang)
+    tgt = normalize_language_code(args.target_lang)
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        ver = _pkg_version("realtime-interpreter")
+    except Exception:
+        ver = "unknown"
+    plat = (
+        f"{platform.system()} {platform.release()} ({platform.machine()}), "
+        f"Python {platform.python_version()}"
+    )
+    summary_on = args.summary_interval_seconds > 0
+    endpoint: str | None = None
+
+    if args.backend == "mlx":
+        model = getattr(getattr(backend, "translator", None), "model_id", None) or (
+            args.model or "default"
+        )
+        seg = f"end_silence={args.end_silence_ms}ms, max_segment={args.max_segment_seconds}s"
+        summ = f"every {args.summary_interval_seconds}s (local Gemma 4)" if summary_on else "off"
+    elif args.backend == "openai-realtime":
+        model = args.openai_model
+        maxseg = (
+            f"{args.openai_max_segment_seconds}s"
+            if args.openai_max_segment_seconds > 0
+            else "off"
+        )
+        seg = f"debounce={args.openai_debounce_ms}ms, max_segment={maxseg}"
+        summ = (
+            f"every {args.summary_interval_seconds}s ({args.openai_summary_model})"
+            if summary_on
+            else "off"
+        )
+    elif args.backend == "gemini-realtime":
+        model = args.gemini_model
+        maxseg = (
+            f"{args.gemini_max_segment_seconds}s"
+            if args.gemini_max_segment_seconds > 0
+            else "off"
+        )
+        seg = f"debounce={args.gemini_debounce_ms}ms, max_segment={maxseg}"
+        summ = (
+            f"every {args.summary_interval_seconds}s ({args.gemini_summary_model})"
+            if summary_on
+            else "off"
+        )
+    elif args.backend == "openai-chat":
+        model = args.openai_chat_model
+        endpoint = args.openai_chat_base_url
+        seg = f"end_silence={args.end_silence_ms}ms, max_segment={args.max_segment_seconds}s"
+        summ = (
+            f"every {args.summary_interval_seconds}s ({args.openai_chat_model})"
+            if summary_on
+            else "off"
+        )
+    else:  # pragma: no cover - defensive
+        model, seg, summ = "?", "", "off"
+
+    if args.max_session_seconds <= 0:
+        max_session = "unlimited"
+    elif args.max_session_seconds == DEFAULT_MAX_SESSION_SECONDS:
+        max_session = f"{args.max_session_seconds}s (24h)"
+    else:
+        max_session = f"{args.max_session_seconds}s"
+
+    pairs: list[tuple[str, str]] = [
+        ("version", ver),
+        ("platform", plat),
+        ("backend", f"{args.backend} ({model})"),
+        ("languages", f"{language_name(src)} ({src}) -> {language_name(tgt)} ({tgt})"),
+        ("capture", _capture_label(args.device)),
+    ]
+    if endpoint:
+        pairs.append(("endpoint", endpoint))
+    pairs.append(("segmentation", seg))
+    pairs.append(("summary", summ))
+    pairs.append(("max_session", max_session))
+    pairs.append(("tls", "OS certificate store (truststore)" if args.system_certs else "bundled CAs"))
+    return pairs
+
+
 class _SummaryState:
     """直近の累積要約をスレッドセーフに保持するホルダー.
 
@@ -1185,7 +1287,11 @@ def main() -> None:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(2)
 
-    session_logger = SessionLogger(log_dir=log_dir, timestamp=timestamp)
+    session_logger = SessionLogger(
+        log_dir=log_dir,
+        timestamp=timestamp,
+        settings=_collect_settings(args, backend),
+    )
     print(f"Log: {session_logger.path}", file=sys.stderr)
     _emit_settings(args)
     if args.system_certs:

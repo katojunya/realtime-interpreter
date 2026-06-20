@@ -119,6 +119,21 @@ def test_windows_capture_label_unknown_returns_none() -> None:
     assert m._windows_capture_label("99") is None
 
 
+# ---------------- _capture_label (ログ/表示用 "[index] name (kind)") ----------------
+
+
+def test_capture_label_windows(monkeypatch) -> None:
+    monkeypatch.setattr(m, "_is_windows", lambda: True)
+    # 入力の番号 → マイク
+    assert m._capture_label("0") == "[0] Microphone (Realtek) (microphone)"
+    # 出力(loopback)の番号 → loopback ([Loopback] 接尾辞は除去)
+    assert m._capture_label("2") == "[2] Speakers (WASAPI loopback)"
+    # 既定 (DEVICE_NAME) → 既定出力の loopback
+    assert m._capture_label(DEVICE_NAME) == "[2] Speakers (WASAPI loopback)"
+    # 不正番号 → フォールバック
+    assert m._capture_label("99") == "device #99"
+
+
 # ---------------- _format_windows_device_list ----------------
 
 
