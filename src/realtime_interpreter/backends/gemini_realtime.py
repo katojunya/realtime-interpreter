@@ -40,6 +40,29 @@ logger = logging.getLogger(__name__)
 GEMINI_SAMPLE_RATE = 16000
 GEMINI_REALTIME_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 
+# Gemini live-translate は中国語を BCP-47 スクリプトサブタグ (zh-Hans=簡体字 /
+# zh-Hant=繁体字) で受け取り、地域コード (zh-CN/zh-TW/zh-HK) や素の zh は非対応。
+# どのエイリアスで指定されても確実に字体へ寄せて targetLanguageCode に反映する。
+_GEMINI_LANG_ALIASES = {
+    "zh": "zh-Hans",
+    "zh-cn": "zh-Hans",
+    "zh-sg": "zh-Hans",
+    "zh-hans": "zh-Hans",
+    "zh-tw": "zh-Hant",
+    "zh-hk": "zh-Hant",
+    "zh-mo": "zh-Hant",
+    "zh-hant": "zh-Hant",
+}
+
+
+def _gemini_target_language_code(code: str) -> str:
+    """target 言語コードを Gemini live-translate が受け付ける形へ正規化する.
+
+    中国語の各種エイリアス (zh, zh-CN, zh-TW, zh-Hant…) を zh-Hans / zh-Hant に
+    寄せる。それ以外は BCP-47 正規化済みの値をそのまま返す。
+    """
+    return _GEMINI_LANG_ALIASES.get(code.lower(), code)
+
 
 def _is_windows() -> bool:
     return sys.platform == "win32"
@@ -290,7 +313,7 @@ class GeminiRealtimeBackend:
                 "generationConfig": {
                     "responseModalities": ["AUDIO"],
                     "translationConfig": {
-                        "targetLanguageCode": self.target_lang,
+                        "targetLanguageCode": _gemini_target_language_code(self.target_lang),
                         "echoTargetLanguage": False
                     }
                 },

@@ -494,7 +494,9 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULT_TARGET,
         metavar="CODE",
         help=(
-            "Target (translation) language ISO 639-1 code. "
+            "Target (translation) language code (ISO 639-1, or BCP-47 with a "
+            "script subtag). For Chinese on gemini-realtime use zh-Hans (Simplified) "
+            "or zh-Hant (Traditional); zh-cn/zh-tw/zh-hk are mapped accordingly. "
             "Affects prompt for mlx/openai-chat backends when available and "
             "audio.output.language for openai realtime backend. "
             f"(default: {DEFAULT_TARGET!r}). Aliases: --to, -t. Use --list-languages."
@@ -805,7 +807,7 @@ def _print_languages() -> None:
             marker = " (default source)"
         if code == DEFAULT_TARGET:
             marker += " (default target)"
-        print(f"  {code:<4} {name}{marker}")
+        print(f"  {code:<8} {name}{marker}")
     print()
     print("Pass any code (incl. those not listed) via --source-lang/--from/-s")
     print("or --target-lang/--to/-t. Unknown codes are passed to the backend as-is.")

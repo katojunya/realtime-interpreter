@@ -85,6 +85,19 @@ EN_SENTENCE_ENDS = ".!?"
 _LEADING_PUNCT = " 　.,。、!?！？;；:：…・\t\n"
 
 
+def _openai_output_language(code: str) -> str:
+    """OpenAI realtime translate の output.language 用に正規化する.
+
+    この API (gpt-realtime-translate) は中国語を 1 種類のみ対応し、簡体字/繁体字を
+    選べない。zh 系のスクリプト/地域サブタグ (zh-Hans/zh-Hant/zh-TW…) は ISO-639-1 の
+    "zh" に潰す (zh-Hant を指定しても繁体字は出ない: README の既知の制限どおり)。
+    それ以外のコードはそのまま渡す。
+    """
+    if code.lower().split("-")[0] == "zh":
+        return "zh"
+    return code
+
+
 def _clean_leading(text: str) -> str:
     """先頭の句読点・記号・空白を除去する.
 
@@ -421,7 +434,7 @@ class OpenAIRealtimeBackend:
                         "transcription": {"model": INPUT_TRANSCRIPTION_MODEL},
                         "noise_reduction": {"type": "near_field"},
                     },
-                    "output": {"language": self.target_lang},
+                    "output": {"language": _openai_output_language(self.target_lang)},
                 },
             },
         }

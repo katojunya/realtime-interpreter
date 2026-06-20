@@ -40,6 +40,28 @@ def test_normalize_language_code() -> None:
     assert normalize_language_code("ES") == "es"
 
 
+def test_normalize_preserves_script_subtag_casing() -> None:
+    # スクリプトサブタグは Title case を保持 (Gemini の zh-Hans/zh-Hant 要件)
+    assert normalize_language_code("zh-Hans") == "zh-Hans"
+    assert normalize_language_code("zh-hant") == "zh-Hant"
+    assert normalize_language_code("ZH-HANT") == "zh-Hant"
+    assert normalize_language_code("  Zh-HaNs ") == "zh-Hans"
+
+
+def test_normalize_uppercases_region_subtag() -> None:
+    assert normalize_language_code("zh-cn") == "zh-CN"
+    assert normalize_language_code("ZH-TW") == "zh-TW"
+    assert normalize_language_code("pt-br") == "pt-BR"
+
+
+def test_chinese_variant_names_resolve() -> None:
+    assert language_name("zh") == "Chinese"
+    assert language_name("zh-Hans") == "Chinese (Simplified)"
+    assert language_name("zh-hant") == "Chinese (Traditional)"  # 大小無視
+    assert language_name("zh-tw") == "Chinese (Traditional, Taiwan)"
+    assert language_name("zh-CN") == "Chinese (Simplified, mainland China)"
+
+
 def test_languages_dict_contains_defaults() -> None:
     assert DEFAULT_SOURCE in LANGUAGES
     assert DEFAULT_TARGET in LANGUAGES
