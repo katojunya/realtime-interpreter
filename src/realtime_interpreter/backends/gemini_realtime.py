@@ -31,6 +31,23 @@ from realtime_interpreter.i18n import DEFAULT_SOURCE, DEFAULT_TARGET, language_n
 logger = logging.getLogger(__name__)
 
 GEMINI_SAMPLE_RATE = 16000
+# Gemini Live が返す翻訳音声 (出力) のサンプルレート (PCM16, mono)。
+# 実際は inlineData.mimeType (例 "audio/pcm;rate=24000") から取得し、無ければこの値。
+GEMINI_OUTPUT_SAMPLE_RATE = 24000
+
+
+def _pcm_rate_from_mime(mime: str | None) -> int | None:
+    """"audio/pcm;rate=24000" 形式の mimeType からサンプルレートを取り出す."""
+    if not mime:
+        return None
+    for part in mime.split(";"):
+        part = part.strip()
+        if part.startswith("rate="):
+            try:
+                return int(part[len("rate=") :])
+            except ValueError:
+                return None
+    return None
 GEMINI_REALTIME_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 
 
@@ -172,6 +189,8 @@ class GeminiRealtimeBackend:
         # ステータス表示状態 (audio=左メーター / comm=右通信ステータス)
         self._audio_cb: Callable[[object], None] | None = None
         self._comm_cb: Callable[[object], None] | None = None
+        # 読み上げ (--read-aloud): モデル生成の翻訳音声 (PCM16) を再生へ流すコールバック。
+        self._audio_output_cb: Callable[[bytes, int], None] | None = None
         # メーター更新の間引き (send_loop はチャンク毎に呼ぶため). 状態変化時は即時。
         self._last_status_at: float = 0.0
         self._last_status_key: object = None
@@ -187,6 +206,26 @@ class GeminiRealtimeBackend:
     ) -> None:
         self._audio_cb = audio_cb
         self._comm_cb = comm_cb
+
+    def set_audio_output_callback(self, cb: Callable[[bytes, int], None]) -> None:
+        """読み上げ用に、モデル生成の翻訳音声 (PCM16 bytes, sample_rate) を流す cb を登録."""
+        self._audio_output_cb = cb
+
+    def _emit_output_audio(self, inline: dict) -> None:
+        """inlineData (base64 PCM16) を読み上げコールバックへ渡す."""
+        cb = self._audio_output_cb
+        if cb is None:
+            return
+        data_b64 = inline.get("data")
+        if not data_b64:
+            return
+        try:
+            pcm = base64.b64decode(data_b64)
+        except Exception:
+            logger.debug("failed to decode Gemini inlineData audio")
+            return
+        rate = _pcm_rate_from_mime(inline.get("mimeType")) or GEMINI_OUTPUT_SAMPLE_RATE
+        cb(pcm, rate)
 
     def _comm_status_text(self) -> Text:
         """右スロット用の通信ステータス文言."""
@@ -702,6 +741,11 @@ class GeminiRealtimeBackend:
                 if text_part:
                     self._append_output(text_part)
                     has_new_output = True
+                # 読み上げ有効時のみ翻訳音声 (inlineData) を再生へ流す。
+                # cb 未登録 (読み上げ無効) なら _emit_output_audio は即 return。
+                inline = part.get("inlineData") or part.get("inline_data")
+                if inline:
+                    self._emit_output_audio(inline)
             if has_new_output and self._state != BackendState.TRANSLATING:
                 self._state = BackendState.TRANSLATING
                 self._update_status_display()

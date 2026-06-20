@@ -81,3 +81,11 @@ class TranslationBackend(Protocol):
         """
         ...
 
+    # 任意メソッド (Protocol の必須面には含めない):
+    #   def set_audio_output_callback(self, cb: Callable[[bytes, int], None]) -> None
+    # モデル生成の翻訳音声 (PCM16) を読み上げ再生へ流すコールバックを登録する。
+    # ネイティブ音声を持つ realtime 系 (gemini-realtime / openai-realtime) のみ実装し、
+    # gemma4 系 (openai-chat / mlx) は実装しない。呼び出し側は hasattr で存在を確認する。
+    # 必須面に含めると音声非対応バックエンドが isinstance(..., TranslationBackend) を
+    # 満たさなくなるため、あえて任意扱いとする。
+

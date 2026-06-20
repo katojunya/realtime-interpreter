@@ -62,6 +62,20 @@ def find_device(name: str, sd_module: ModuleType) -> int:
     raise RuntimeError(f"Device '{name}' not found. Available: {available}")
 
 
+def find_output_device(name: str, sd_module: ModuleType) -> int:
+    """デバイス名で出力 (再生) デバイスを検索しインデックスを返す.
+
+    `find_device` の対称形だが、こちらは `max_output_channels > 0` で絞り込む
+    (読み上げ音声の再生先デバイス選択に使う)。
+    """
+    devices = sd_module.query_devices()
+    for index, device in enumerate(devices):
+        if name in device["name"] and device["max_output_channels"] > 0:
+            return index
+    available = [d["name"] for d in devices if d["max_output_channels"] > 0]
+    raise RuntimeError(f"Output device '{name}' not found. Available: {available}")
+
+
 def _to_mono(samples: np.ndarray) -> np.ndarray:
     """ステレオ (N, channels) または 1 次元音声をモノラル float32 に変換."""
     if samples.ndim == 2:

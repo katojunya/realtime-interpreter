@@ -20,6 +20,7 @@ target 言語の訳を生成する。バックエンドは TranslatedSegment を
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import os
 import subprocess
@@ -176,6 +177,29 @@ def _list_devices() -> None:
             print()
             print("On Windows, system audio is captured via WASAPI loopback.")
             print("Omit --device to loopback the default speaker, or pass a loopback device name.")
+
+            # 読み上げ (--read-aloud) の出力先 (--playback-device) に使える出力デバイス。
+            print()
+            print("Playback devices selectable via --playback-device (--read-aloud):")
+            print()
+            default_out_name = default_out["name"]
+            found_out = False
+            for i in range(pa.get_device_count()):
+                dev = pa.get_device_info_by_index(i)
+                if dev.get("maxOutputChannels", 0) <= 0:
+                    continue
+                found_out = True
+                marker = "  <- default output" if dev["name"] == default_out_name else ""
+                print(
+                    f"  [{dev['index']}] {dev['name']} "
+                    f"(out={dev['maxOutputChannels']}, rate={int(dev['defaultSampleRate'])})"
+                    f"{marker}"
+                )
+            if not found_out:
+                print("  (no output-capable devices found)")
+            print()
+            print("Choose a playback device DIFFERENT from the loopback capture target")
+            print("above, otherwise the spoken translation will be re-captured.")
         finally:
             pa.terminate()
         return
@@ -200,6 +224,26 @@ def _list_devices() -> None:
     print("Pass a device name (substring match) to --device to choose the capture input.")
     print("On macOS, capture system audio via BlackHole 2ch (a Multi-Output Device routes")
     print("speaker audio into BlackHole so this program can read it as an input).")
+
+    # 読み上げ (--read-aloud) の出力先 (--playback-device) に使える出力デバイス。
+    default_out = sd.default.device[1]
+    print()
+    print("Output devices selectable via --playback-device (--read-aloud):")
+    print()
+    found_out = False
+    for index, dev in enumerate(devices):
+        if dev["max_output_channels"] <= 0:
+            continue
+        found_out = True
+        marker = "  <- default-out" if index == default_out else ""
+        print(
+            f"  {index:>2}: {dev['name']} [out={dev['max_output_channels']}]{marker}"
+        )
+    if not found_out:
+        print("  (no output-capable devices found)")
+    print()
+    print("Choose a playback device DIFFERENT from the capture path (NOT BlackHole and")
+    print("NOT the Multi-Output Device) so the spoken translation is not re-captured.")
 
 
 def _print_capture_target(device_name: str) -> None:
@@ -253,6 +297,118 @@ def _check_input_device(device_name: str) -> None:
             except Exception:
                 pass
         input("  Press Enter when ready: ")
+
+
+def _names_overlap(a: str, b: str) -> bool:
+    """部分一致 (大文字小文字無視) で 2 つのデバイス名が重なるか判定する."""
+    if not a or not b:
+        return False
+    al, bl = a.lower(), b.lower()
+    return al in bl or bl in al
+
+
+def _check_playback_device(
+    playback_device_name: str | None, capture_device_name: str
+) -> None:
+    """読み上げ出力デバイスがキャプチャ対象と同一でないか検証する.
+
+    同一/包含関係ならループバック再入力が起きるため SystemExit で中止する。
+    macOS で現在のシステム既定出力 (Multi-Output Device の可能性) と一致する場合は
+    強い警告に留める (BlackHole へ回り込む恐れ)。
+    """
+    if not playback_device_name:
+        raise SystemExit(
+            "error: --read-aloud requires --playback-device <name>. Choose an output "
+            "device different from the capture path (see --list-devices)."
+        )
+
+    if _is_windows():
+        # Windows: キャプチャは指定/既定出力の WASAPI loopback。再生先がその出力と
+        # 一致すると loopback が読み上げを拾う。
+        import pyaudiowpatch as pyaudio
+
+        pa = pyaudio.PyAudio()
+        try:
+            wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+            default_out = pa.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
+            capture_target = (
+                default_out["name"]
+                if (not capture_device_name or capture_device_name == DEVICE_NAME)
+                else capture_device_name
+            )
+        finally:
+            pa.terminate()
+        if _names_overlap(playback_device_name, capture_target):
+            raise SystemExit(
+                f"error: --playback-device {playback_device_name!r} overlaps the WASAPI "
+                f"loopback capture target {capture_target!r}; the spoken translation would "
+                "be re-captured. Choose a different output device (see --list-devices)."
+            )
+        return
+
+    # macOS/Linux: キャプチャは BlackHole 入力。再生先が BlackHole / --device と
+    # 重なれば確実にループバック。
+    if "blackhole" in playback_device_name.lower() or _names_overlap(
+        playback_device_name, capture_device_name
+    ):
+        raise SystemExit(
+            f"error: --playback-device {playback_device_name!r} overlaps the capture device "
+            f"{capture_device_name!r}; the spoken translation would be re-captured. "
+            "Choose a different output device (see --list-devices)."
+        )
+    sd = _load_sounddevice()
+    try:
+        default_out = sd.default.device[1]
+        out_name = sd.query_devices(default_out)["name"]
+    except Exception:
+        out_name = ""
+    if _names_overlap(playback_device_name, out_name):
+        print(
+            f"warning: --playback-device {playback_device_name!r} matches the current system "
+            f"output {out_name!r}. If that is a Multi-Output Device feeding BlackHole, the "
+            "spoken translation will loop back into capture. Prefer a separate device "
+            "(e.g. headphones).",
+            file=sys.stderr,
+        )
+
+
+def _open_player(playback_device_name: str, sd_module: object):
+    """プラットフォームに応じた AudioPlayer を生成して返す (start は __enter__ で行う)."""
+    from realtime_interpreter.playback import (
+        SoundDeviceAudioPlayer,
+        WindowsAudioPlayer,
+    )
+
+    if _is_windows():
+        import pyaudiowpatch as pyaudio
+
+        pa = pyaudio.PyAudio()
+        try:
+            index = None
+            rate = None
+            for i in range(pa.get_device_count()):
+                dev = pa.get_device_info_by_index(i)
+                if dev.get("maxOutputChannels", 0) > 0 and playback_device_name in dev["name"]:
+                    index = int(dev["index"])
+                    rate = int(dev["defaultSampleRate"])
+                    break
+        finally:
+            pa.terminate()
+        if index is None:
+            raise SystemExit(
+                f"error: playback device {playback_device_name!r} not found "
+                "(output-capable). See --list-devices."
+            )
+        return WindowsAudioPlayer(index, rate)
+
+    from realtime_interpreter.audio import find_output_device
+
+    try:
+        index = find_output_device(playback_device_name, sd_module)
+    except RuntimeError as e:
+        raise SystemExit(f"error: {e}")
+    rate = int(sd_module.query_devices(index)["default_samplerate"])
+    return SoundDeviceAudioPlayer(index, rate, sd_module)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -322,6 +478,25 @@ def _parse_args() -> argparse.Namespace:
         "--device",
         default=DEVICE_NAME,
         help=f"Audio input device name (default: {DEVICE_NAME!r})",
+    )
+    parser.add_argument(
+        "--read-aloud",
+        action="store_true",
+        help=(
+            "Speak the translation aloud using the backend's native audio "
+            "(gemini-realtime / openai-realtime only). Requires --playback-device. "
+            "No extra cost (audio is already generated/billed)."
+        ),
+    )
+    parser.add_argument(
+        "--playback-device",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Output device name (substring match) for --read-aloud. MUST differ from "
+            "the capture device (not BlackHole / not the loopback target) to avoid "
+            "re-capturing the spoken translation. See --list-devices."
+        ),
     )
 
     # 共通の言語切替フラグ. ISO 639-1 2文字コード.
@@ -1073,13 +1248,33 @@ def main() -> None:
         else time.monotonic() + args.max_session_seconds
     )
 
+    # 読み上げ (--read-aloud): ネイティブ音声を持つ realtime 系のみ対応。
+    # 非対応バックエンドでは警告してテキストのみ続行。Live 表示前にデバイス検証する。
+    read_aloud = args.read_aloud and hasattr(backend, "set_audio_output_callback")
+    if args.read_aloud and not read_aloud:
+        print(
+            f"warning: backend {args.backend!r} has no native translation audio; "
+            "--read-aloud is ignored (text-only).",
+            file=sys.stderr,
+        )
+    player = None
+    if read_aloud:
+        _check_playback_device(args.playback_device, args.device)
+        sd_for_player = None if _is_windows() else _load_sounddevice()
+        player = _open_player(args.playback_device, sd_for_player)
+        print(f"Read-aloud: {args.playback_device}", file=sys.stderr)
+
     try:
-        with StreamingRenderer() as renderer:
+        with contextlib.ExitStack() as stack:
+            renderer = stack.enter_context(StreamingRenderer())
             if hasattr(backend, "set_status_callback"):
                 # 左=音声入力レベル / 右=LLM通信ステータス の 2 スロットへ配線
                 backend.set_status_callback(
                     renderer.update_audio_status, renderer.update_comm_status
                 )
+            if player is not None:
+                stack.enter_context(player)
+                backend.set_audio_output_callback(player.enqueue)
             with backend:
                 for seg in backend.stream_segments():
                     if session_deadline is not None and time.monotonic() >= session_deadline:

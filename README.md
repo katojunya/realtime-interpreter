@@ -140,13 +140,21 @@ uv run realtime-interpreter \
 
 終了は `Ctrl+C`。Windows ではデフォルトスピーカーの音を WASAPI ループバックで取り込みます。別の出力デバイスを取り込むには `--device "<出力デバイス名>"`、一覧は `--list-devices`。
 
+### 訳文の読み上げ (`--read-aloud`)
+
+`--read-aloud --playback-device "<出力デバイス名>"` で、訳文をモデルのネイティブ音声で読み上げます (`openai-realtime` / `gemini-realtime` のみ。`openai-chat` / `mlx` は音声出力を持たないため非対応)。
+
+読み上げ音声がキャプチャ入力へ**ループバック再入力されない**よう、`--playback-device` はキャプチャ対象と**別の物理デバイス**を指定してください (例: ヘッドホン)。BlackHole やキャプチャ対象の出力と重なる場合は起動時にエラーで停止します。macOS で BlackHole を含む Multi-Output Device を指定すると回り込むため避けてください。出力デバイスの一覧は `--list-devices` で確認できます。
+
 ### オプション
 
 | フラグ | 説明 | デフォルト | 対象 |
 |---|---|---|---|
 | `--backend` | `openai-realtime` / `gemini-realtime` / `openai-chat` / `mlx` | `openai-realtime` | 共通 |
 | `--device` | 入力/取り込みデバイス名 (部分一致) | `BlackHole 2ch` (macOS) | 共通 |
-| `--list-devices` | オーディオデバイス一覧を表示して終了 | — | 共通 |
+| `--read-aloud` | 訳文をモデルのネイティブ音声で読み上げる。`--playback-device` 必須。追加課金なし | (off) | openai-realtime / gemini-realtime |
+| `--playback-device` | 読み上げの出力デバイス名 (部分一致)。キャプチャ対象と別デバイス必須 | — | 読み上げ時 |
+| `--list-devices` | オーディオデバイス一覧 (入力/出力) を表示して終了 | — | 共通 |
 | `--device-check` | 起動時に出力デバイスのルーティングを確認 (macOS)。デフォルトはスキップ | (off) | 共通 |
 | `--source-lang` / `--from` / `-s` | 音声の言語 (ISO 639-1) | `en` | 共通 |
 | `--target-lang` / `--to` / `-t` | 翻訳先の言語 (ISO 639-1) | `ja` | 共通 |
@@ -297,6 +305,8 @@ uv run pytest
 | **合計** | | **約 $3.11 / 時** (1 営業日 8h ≈ $25) |
 
 詳細は [OpenAI Realtime 料金ページ](https://developers.openai.com/api/docs/models/gpt-realtime-translate)。
+
+`--read-aloud` を有効にしても**追加課金はありません**。`gpt-realtime-translate` は音声の分単位定額課金 (トークン課金ではない) で、翻訳音声は受信の有無に関わらず生成・課金済みのためです。
 
 ### gemini-realtime
 

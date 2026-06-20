@@ -284,6 +284,8 @@ class OpenAIRealtimeBackend:
         # ステータス表示状態 (audio=左メーター / comm=右通信ステータス)
         self._audio_cb: Callable[[object], None] | None = None
         self._comm_cb: Callable[[object], None] | None = None
+        # 読み上げ (--read-aloud): モデル生成の翻訳音声 (PCM16) を再生へ流すコールバック。
+        self._audio_output_cb: Callable[[bytes, int], None] | None = None
         # メーター更新の間引き (send_loop はチャンク毎に呼ぶため). 状態変化時は即時。
         self._last_status_at: float = 0.0
         self._last_status_key: object = None
@@ -315,6 +317,10 @@ class OpenAIRealtimeBackend:
     ) -> None:
         self._audio_cb = audio_cb
         self._comm_cb = comm_cb
+
+    def set_audio_output_callback(self, cb: Callable[[bytes, int], None]) -> None:
+        """読み上げ用に、モデル生成の翻訳音声 (PCM16 bytes, sample_rate) を流す cb を登録."""
+        self._audio_output_cb = cb
 
     def _comm_status_text(self) -> Text:
         """右スロット用の通信ステータス文言."""
@@ -737,8 +743,20 @@ class OpenAIRealtimeBackend:
             self._update_status_display()
             return
 
-        # 翻訳音声は使わない. ノイズ抑制のため明示スキップ.
-        if etype.endswith("output_audio.delta") or etype.endswith("output_audio.done"):
+        # 翻訳音声: 読み上げ (--read-aloud) 有効時のみ再生へ流す。無効時は明示スキップ。
+        # gpt-realtime-translate は分単位定額課金で、出力音声は受信の有無に関わらず
+        # 生成・課金済みのため、再生を有効にしても追加課金は発生しない。
+        if etype.endswith("output_audio.delta"):
+            cb = self._audio_output_cb
+            if cb is not None:
+                b64 = event.get("delta", "")
+                if b64:
+                    try:
+                        cb(base64.b64decode(b64), OPENAI_SAMPLE_RATE)
+                    except Exception:
+                        logger.debug("failed to decode output_audio.delta")
+            return
+        if etype.endswith("output_audio.done"):
             return
 
         # 英語 (入力) 転写の delta
