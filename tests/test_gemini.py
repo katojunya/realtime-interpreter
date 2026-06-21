@@ -9,8 +9,49 @@ import pytest
 from realtime_interpreter.backends.gemini_realtime import (
     GeminiRealtimeBackend,
     _PendingTurn,
+    _gemini_target_language_code,
 )
 from realtime_interpreter.summarizer import GeminiRESTSummarizer
+
+
+class _FakeWS:
+    """送信ペイロードを記録するだけの WebSocket スタブ."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def send(self, payload: str) -> None:
+        self.sent.append(payload)
+
+
+def test_gemini_target_language_code_maps_chinese_variants() -> None:
+    assert _gemini_target_language_code("zh") == "zh-Hans"
+    assert _gemini_target_language_code("zh-CN") == "zh-Hans"
+    assert _gemini_target_language_code("zh-Hans") == "zh-Hans"
+    assert _gemini_target_language_code("zh-TW") == "zh-Hant"
+    assert _gemini_target_language_code("zh-hk") == "zh-Hant"
+    assert _gemini_target_language_code("zh-Hant") == "zh-Hant"
+    # 非中国語はそのまま
+    assert _gemini_target_language_code("ja") == "ja"
+    assert _gemini_target_language_code("pt-BR") == "pt-BR"
+
+
+def test_gemini_setup_sends_mapped_target_language_code() -> None:
+    # --to zh-Hant / zh-tw 等が translationConfig.targetLanguageCode に正しく反映される。
+    for target, expected in [("zh-Hant", "zh-Hant"), ("zh-tw", "zh-Hant"), ("zh", "zh-Hans")]:
+        backend = GeminiRealtimeBackend(
+            sd_module=None,
+            device_name="dummy",
+            api_key="dummy_key",
+            model="models/gemini-3.5-live-translate-preview",
+            loopback=False,
+            target_lang=target,
+        )
+        backend._ws = _FakeWS()
+        backend._send_session_config()
+        setup = json.loads(backend._ws.sent[-1])["setup"]
+        tlc = setup["generationConfig"]["translationConfig"]["targetLanguageCode"]
+        assert tlc == expected, f"{target} -> {tlc}, expected {expected}"
 
 
 def test_gemini_pending_turn_accumulation() -> None:
