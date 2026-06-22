@@ -1,6 +1,6 @@
 # realtime-interpreter (Windows, macOS 対応 コンソール翻訳アプリ)
 
-音声をマルチモーダル LLM に直接入力して、文字起こしと翻訳テキストをリアルタイムに同時に生成するアプリケーションです。デフォルトは日本語への翻訳です。一定間隔(デフォルトでは1分)で翻訳先の言語で要約を表示します。GUIはありません、すべてターミナルで動作します。
+音声をマルチモーダル LLM に直接入力して、文字起こしと翻訳テキストをリアルタイムに同時に生成するアプリケーションです。デフォルトは日本語への翻訳です。一定間隔(デフォルトでは1分)で翻訳先の言語で要約を表示します。GUIはありません。すべてターミナルで動作します。
 
 画面の様子は OpenAI が GPT-Realtime-Translate のモデルを発表したときの [YouTube 動画](https://www.youtube.com/watch?v=JOu8v6CBjkE)の音声をリアルタイムに翻訳している様子です。
 
@@ -15,7 +15,7 @@
 | `openai-chat` | OpenAI 互換 Chat Completions REST API | ローカル動作でVAD処理を行い、WAVに変換した音声をLLMへ入力。Ollamaなどローカルで動くエンジンを想定していますが、エンドポイント変更で OpenAI Webサービスの利用も可です。 |
 | `mlx` (macOS のみ) | mlx-vlm + Gemma 4 (ローカル) | ローカル動作、Apple Silicon 専用 macOS ネイティブ |
 
-デフォルトのバックエンドは**両OSで `openai-realtime`**。MLX は Apple Silicon の macOS でのみ利用可能です:
+デフォルトのバックエンドは**両OSで `openai-realtime`**。mlx は Apple Silicon の macOS でのみ利用可能です:
 
 - **Windows**: `openai-realtime` / `gemini-realtime` / `openai-chat`
 - **macOS (Apple Silicon)**: `openai-realtime` / `gemini-realtime` / `openai-chat` / `mlx`
@@ -79,7 +79,7 @@ WASAPI loopback (Windows) / BlackHole 2ch (macOS)
 ```
 BlackHole 2ch
   → SpeechSegmentCapture (Silero VAD で発話を区切る. 無音 800ms or 最大 8s で finalize)
-  → GemmaAudioTranslator (mlx-vlm + google/gemma-4-e4b-it 4bit)
+  → GemmaAudioTranslator (mlx-vlm + mlx-community/gemma-4-e4b-it-4bit)
        1 回の推論で "SRC: ... / TGT: ..." を生成
   → 確定したセグメント単位で append-only 出力
   → [60秒ごと] 同じ Gemma 4 をテキスト専用で再利用して要約
@@ -88,7 +88,7 @@ BlackHole 2ch
 ## 長時間連続動作に対するセーフティ機構
 
 全バックエンド共通で `--max-session-seconds` (デフォルト 86400 = 24 時間) を超えると自動停止します。従量課金の暴走を防ぐセーフティです。
-ユーザーが明示的に制限を解除するなら `--max-session-seconds 0` 指定して下さい。
+ユーザーが明示的に制限を解除するなら `--max-session-seconds 0` を指定して下さい。
 
 ## 必要なディスク容量
 
