@@ -221,7 +221,11 @@ def test_build_diarizer_forwards_threshold(monkeypatch) -> None:
     args = m._parse_args()
     captured: dict[str, float] = {}
 
-    def fake_make(threshold: float = DEFAULT_SIMILARITY_THRESHOLD, min_seconds: float = 0.6):
+    def fake_make(
+        threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+        min_seconds: float = 0.6,
+        split: bool = False,
+    ):
         captured["threshold"] = threshold
         return "DIARIZER_SENTINEL"
 
@@ -244,3 +248,149 @@ def test_collect_settings_omits_diarization_for_realtime(monkeypatch) -> None:
     args = _args(["--backend", "openai-realtime", "--diarize"], monkeypatch)
     pairs = dict(m._collect_settings(args, object()))
     assert "diarization" not in pairs
+
+
+# --- 変化点検出 (--diarize-split) ---
+
+
+class _SplitDummyEmbedder:
+    """分割テスト用の注入埋め込み.
+
+    - embed_partials(): コンストラクタで与えた固定の部分埋め込み列/スパンを返す
+      (= 境界検出を決定論的に制御)。
+    - __call__(): 音声の平均符号で話者を擬似判定 (+ → 話者A / − → 話者B)。
+      → 分割後の各ピースをラベル付けする assign() を決定論化する。
+    """
+
+    def __init__(self, partials: list[list[float]], spans: list[tuple[int, int]]):
+        self._partials = np.asarray(partials, dtype=np.float32)
+        self._spans = spans
+
+    def __call__(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        mean = float(np.mean(audio)) if np.size(audio) else 0.0
+        return (
+            np.array([1.0, 0.0, 0.0], dtype=np.float32)
+            if mean >= 0
+            else np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        )
+
+    def embed_partials(self, audio, sample_rate, rate=2.5):
+        return self._partials, self._spans
+
+
+def _windows(n: int, win: int = SR) -> list[tuple[int, int]]:
+    return [(i * win, (i + 1) * win) for i in range(n)]
+
+
+def test_split_detects_speaker_change() -> None:
+    # 6窓 [A,A,A,B,B,B] → 窓2-3 間で類似度が落ちる → 1境界 (中央 48000) で2分割。
+    A, B = [1, 0, 0], [0, 1, 0]
+    emb = _SplitDummyEmbedder([A, A, A, B, B, B], _windows(6))
+    d = Diarizer(
+        emb, split_enabled=True, energy_snap=False,
+        split_min_seconds=1.0, boundary_threshold=0.75,
+    )
+    audio = np.empty(6 * SR, dtype=np.float32)
+    audio[: 3 * SR] = 1.0   # 前半 = 話者A
+    audio[3 * SR :] = -1.0  # 後半 = 話者B
+    pieces = d.split_and_label(audio, SR)
+    assert [len(a) for a, _ in pieces] == [3 * SR, 3 * SR]
+    assert [label for _, label in pieces] == ["S1", "S2"]
+    assert d.num_speakers == 2
+
+
+def test_split_disabled_returns_single_piece() -> None:
+    emb = _SplitDummyEmbedder([[1, 0, 0]] * 4, _windows(4))
+    d = Diarizer(emb, split_enabled=False)
+    audio = np.ones(4 * SR, dtype=np.float32)
+    pieces = d.split_and_label(audio, SR)
+    assert len(pieces) == 1
+    assert pieces[0][1] == "S1"
+
+
+def test_split_no_boundary_single_speaker() -> None:
+    # 全窓が同一話者 → 類似度の谷なし → 分割しない。
+    emb = _SplitDummyEmbedder([[1, 0, 0]] * 4, _windows(4))
+    d = Diarizer(emb, split_enabled=True, energy_snap=False)
+    pieces = d.split_and_label(np.ones(4 * SR, dtype=np.float32), SR)
+    assert len(pieces) == 1
+
+
+def test_split_fallback_without_partial_embedder() -> None:
+    # plain callable は embed_partials を持たない → split 有効でも分割せず1ピース。
+    def emb(a: np.ndarray, sr: int) -> np.ndarray:
+        return np.array([1.0, 0.0, 0.0], dtype=np.float32)
+
+    d = Diarizer(emb, split_enabled=True)
+    pieces = d.split_and_label(np.ones(6 * SR, dtype=np.float32), SR)
+    assert len(pieces) == 1
+
+
+def test_split_too_short_returns_single_piece() -> None:
+    emb = _SplitDummyEmbedder([[1, 0, 0], [0, 1, 0]], _windows(2, SR // 2))
+    d = Diarizer(emb, split_enabled=True, split_min_seconds=1.0)
+    # 1.0s < 2*split_min_seconds(2.0s) → 短すぎて分割対象外。
+    pieces = d.split_and_label(np.ones(SR, dtype=np.float32), SR)
+    assert len(pieces) == 1
+
+
+def test_split_respects_max_splits() -> None:
+    # 5境界が立つ窓列でも max_splits=1 なら2ピースまで。
+    A, B = [1, 0, 0], [0, 1, 0]
+    emb = _SplitDummyEmbedder([A, B, A, B, A, B], _windows(6))
+    d = Diarizer(
+        emb, split_enabled=True, energy_snap=False,
+        split_min_seconds=1.0, boundary_threshold=0.75, max_splits=1,
+    )
+    audio = np.ones(6 * SR, dtype=np.float32)
+    pieces = d.split_and_label(audio, SR)
+    assert len(pieces) == 2  # max_splits=1 → 最大2ピース
+
+
+def test_snap_to_energy_min_lands_in_silence() -> None:
+    d = Diarizer(lambda a, sr: np.array([1.0, 0.0, 0.0], np.float32), split_enabled=True)
+    audio = np.ones(2 * SR, dtype=np.float32)
+    audio[15000:17000] = 0.0  # ~1.0s 付近に短い無音
+    snapped = d._snap_to_energy_min(audio, SR, SR)  # cut≈1.0s 付近
+    assert 15000 <= snapped < 17000  # 無音区間へスナップ
+
+
+# --- CLI: --diarize-split ---
+
+
+def test_diarize_split_flag_defaults_false(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["realtime-interpreter"])
+    assert m._parse_args().diarize_split is False
+
+
+def test_diarize_split_flag_parses_true(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["realtime-interpreter", "--diarize-split"])
+    assert m._parse_args().diarize_split is True
+
+
+def test_build_diarizer_forwards_split(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys, "argv", ["realtime-interpreter", "--diarize", "--diarize-split"]
+    )
+    args = m._parse_args()
+    captured: dict[str, bool] = {}
+
+    def fake_make(
+        threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+        min_seconds: float = 0.6,
+        split: bool = False,
+    ):
+        captured["split"] = split
+        return "DIARIZER_SENTINEL"
+
+    monkeypatch.setattr(
+        "realtime_interpreter.diarizer.make_default_diarizer", fake_make
+    )
+    assert m._build_diarizer(args) == "DIARIZER_SENTINEL"
+    assert captured["split"] is True
+
+
+def test_collect_settings_shows_split_when_enabled(monkeypatch) -> None:
+    args = _args(["--backend", "openai-chat", "--diarize", "--diarize-split"], monkeypatch)
+    pairs = dict(m._collect_settings(args, object()))
+    assert "change-point split" in pairs["diarization"]

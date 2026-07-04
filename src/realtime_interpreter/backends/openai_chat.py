@@ -396,38 +396,47 @@ class OpenAIChatBackend:
 
     def stream_segments(self) -> Iterator[TranslatedSegment]:
         for segment in self._capture.segments():
-            try:
-                if self._comm_cb:
-                    self._comm_cb(self._comm_translating())
-                result = self.translator.translate(segment.audio)
-            except Exception:
-                logger.exception("openai-chat translation failed")
+            # 話者ダイアライゼーション: diarizer 有効なら (音声, 話者) のピース列へ。
+            # --diarize-split 有効時はセグメント内の話者交代で複数ピースに分割される。
+            # 無効/diarizer 無しなら 1 ピース (= 従来どおり翻訳 1 回)。
+            if self._diarizer is not None:
+                pieces = self._diarizer.split_and_label(segment.audio, SAMPLE_RATE)
+            else:
+                pieces = [(segment.audio, None)]
+
+            offset = segment.start_offset_seconds
+            for sub_audio, speaker in pieces:
+                dur = len(sub_audio) / SAMPLE_RATE
+                try:
+                    if self._comm_cb:
+                        self._comm_cb(self._comm_translating())
+                    result = self.translator.translate(sub_audio)
+                except Exception:
+                    logger.exception("openai-chat translation failed")
+                    if self._comm_cb:
+                        self._comm_cb(self._comm_listening())
+                    offset += dur
+                    continue
+                # 翻訳完了 → 次の発話待ち (Listening) へ戻す。
                 if self._comm_cb:
                     self._comm_cb(self._comm_listening())
-                continue
-            # 翻訳完了 → 次の発話待ち (Listening) へ戻す。
-            if self._comm_cb:
-                self._comm_cb(self._comm_listening())
-            # 幻覚抑制 (層2a): 直近と逐語一致する転写は破棄する。
-            if self._repetition_guard.is_repeat(result.source):
-                logger.debug(
-                    "dropped repeated (likely hallucinated) segment: %r",
-                    result.source,
+                # 幻覚抑制 (層2a): 直近と逐語一致する転写は破棄する。
+                if self._repetition_guard.is_repeat(result.source):
+                    logger.debug(
+                        "dropped repeated (likely hallucinated) segment: %r",
+                        result.source,
+                    )
+                    offset += dur
+                    continue
+                yield TranslatedSegment(
+                    start_offset_seconds=offset,
+                    duration_seconds=dur,
+                    source=result.source,
+                    target=result.target,
+                    is_partial=False,
+                    speaker=speaker,
                 )
-                continue
-            speaker = (
-                self._diarizer.assign(segment.audio, SAMPLE_RATE)
-                if self._diarizer is not None
-                else None
-            )
-            yield TranslatedSegment(
-                start_offset_seconds=segment.start_offset_seconds,
-                duration_seconds=segment.duration_seconds,
-                source=result.source,
-                target=result.target,
-                is_partial=False,
-                speaker=speaker,
-            )
+                offset += dur
 
 
 class OpenAIChatCompatibleSummarizer:

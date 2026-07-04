@@ -500,6 +500,15 @@ def _parse_args() -> argparse.Namespace:
             f"Default {DEFAULT_SIMILARITY_THRESHOLD}. Only used with --diarize."
         ),
     )
+    parser.add_argument(
+        "--diarize-split",
+        action="store_true",
+        help=(
+            "[experimental] Within a single VAD segment, detect speaker changes "
+            "(no-silence turn switches) and split it into separately labeled/translated "
+            "pieces. Adds latency and may cut mid-sentence. Only used with --diarize."
+        ),
+    )
 
     # 共通の言語切替フラグ. ISO 639-1 2文字コード.
     parser.add_argument(
@@ -853,7 +862,10 @@ def _build_diarizer(args: argparse.Namespace):
         return None
     from realtime_interpreter.diarizer import make_default_diarizer
 
-    return make_default_diarizer(threshold=args.diarize_threshold)
+    return make_default_diarizer(
+        threshold=args.diarize_threshold,
+        split=getattr(args, "diarize_split", False),
+    )
 
 
 def _build_backend(
@@ -1192,9 +1204,11 @@ def _collect_settings(
         pairs.append(("endpoint", endpoint))
     pairs.append(("segmentation", seg))
     if getattr(args, "diarize", False) and args.backend in ("mlx", "openai-chat"):
+        split = " + change-point split" if getattr(args, "diarize_split", False) else ""
         pairs.append((
             "diarization",
-            f"on (experimental, sequential, local embedding, threshold={args.diarize_threshold})",
+            f"on (experimental, sequential, local embedding, "
+            f"threshold={args.diarize_threshold}{split})",
         ))
     pairs.append(("summary", summ))
     pairs.append(("max_session", max_session))
