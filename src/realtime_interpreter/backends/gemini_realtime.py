@@ -116,7 +116,7 @@ class GeminiRealtimeBackend:
         device_name: str,
         api_key: str | None = None,
         model: str = "models/gemini-3.5-live-translate-preview",
-        turn_debounce_ms: int = 800,
+        turn_debounce_ms: int = 1200,
         max_segment_seconds: float = 8.0,
         source_lang: str = DEFAULT_SOURCE,
         target_lang: str = DEFAULT_TARGET,
@@ -709,7 +709,8 @@ class GeminiRealtimeBackend:
         # 3. Turn complete
         # NOTE: ここで即コミットしない。live-translate は短い翻訳単位ごとに
         # turnComplete を頻発させるため、即コミットするとセグメントが過剰分割される
-        # (1〜数語の細切れが多発)。代わりに確定は emit_loop の debounce(無音検出)
+        # (1〜数語の細切れが多発)。代わりに確定は emit_loop の debounce(delta ギャップ
+        # 検出。連続発話中でも翻訳バースト間で 800ms 超のギャップが出るため既定 1200ms)
         # と max_segment(連続発話の上限)だけに委ね、連続するターンを 1 セグメントに
         # 束ねる。これにより openai-realtime と同等の読みやすい粒度になる。
         # turnComplete は「ひと続きの翻訳が一段落した」マーカーに過ぎず、その後 deltas が

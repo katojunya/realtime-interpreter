@@ -115,7 +115,10 @@ DEFAULT_GEMINI_MODEL = "models/gemini-3.5-live-translate-preview"
 # 60秒間隔の長時間会議でも枯渇しにくいため既定に採用。
 # (gemini-3.5-flash は無料枠 RPD=20 と少なく、20分程度で 429 に達する)
 DEFAULT_GEMINI_SUMMARY_MODEL = "gemini-3.1-flash-lite"
-DEFAULT_GEMINI_DEBOUNCE_MS = 800
+# Gemini live-translate は短い翻訳単位ごとのバースト送信のため、連続発話中でも
+# delta ギャップが 800ms を超えるのが常態 (実ログ計測: 800ms だと 3語以下の細切れが
+# 48.5%、1200ms で 1.4% に解消)。openai-realtime (800ms) より長めが適正。
+DEFAULT_GEMINI_DEBOUNCE_MS = 1200
 DEFAULT_GEMINI_MAX_SEGMENT_SECONDS = 8.0
 
 
@@ -696,8 +699,10 @@ def _parse_args() -> argparse.Namespace:
         metavar="MS",
         default=DEFAULT_GEMINI_DEBOUNCE_MS,
         help=(
-            f"[gemini-realtime] Silence duration in milliseconds to commit "
-            f"current segment. (default: {DEFAULT_GEMINI_DEBOUNCE_MS}ms)"
+            f"[gemini-realtime] Commit the current segment after transcript deltas "
+            f"have been quiet for this many milliseconds. Raise to bundle Gemini's "
+            f"bursty translation units into sentences. "
+            f"(default: {DEFAULT_GEMINI_DEBOUNCE_MS}ms)"
         ),
     )
     gemini_group.add_argument(
