@@ -53,13 +53,13 @@ WASAPI loopback (Windows) / BlackHole 2ch (macOS)
   → 16kHz PCM16 で WebSocket ストリーム送信
   → Gemini Multimodal Live API (models/gemini-3.5-live-translate-preview)
        inputAudioTranscription (source) / 翻訳 (target) を delta 単位で受信
-  → debounce (デフォルト 800ms) / 最大 8s で発話確定して append-only 出力
+  → debounce (デフォルト 1200ms) / 最大 8s で発話確定して append-only 出力
   → [60秒ごと] gemini-3.1-flash-lite で要約
 ```
 
 **長時間運用**: Gemini Live は接続 (~10分) / セッション (~15分) に上限がありますが、本実装は **session resumption** (切断をまたいで再接続) と **context window compression** (sliding window でトークン上限を回避) の両方を有効化しており、**数時間の連続セッション**が可能です (実機で 1 時間超の連続翻訳を確認済み)。
 
-**過剰分割対策**: live-translate は短い翻訳単位ごとに `turnComplete` を頻発させます。これを確定トリガにすると 1〜数語の細切れが多発するため、本実装では `turnComplete` を確定に使わず debounce / max_segment のみで束ねています。それでも細切れが気になる場合は `--gemini-rt-debounce-ms` を上げてください (例 1500)。
+**過剰分割対策**: live-translate は短い翻訳単位ごとに `turnComplete` を頻発させます。これを確定トリガにすると 1〜数語の細切れが多発するため、本実装では `turnComplete` を確定に使わず debounce / max_segment のみで束ねています。連続発話中でも翻訳バースト間の delta ギャップが 800ms を超えることが多いため、デフォルトの debounce は openai-realtime (800ms) より長い **1200ms** です (実ログ計測: 800ms では 3語以下の細切れが 48.5%、1200ms で 1.4% に解消)。それでも細切れが気になる場合は `--gemini-rt-debounce-ms` をさらに上げてください (例 1500)。
 
 ### openai-chat バックエンド (OpenAI 互換 Chat Completions REST API)
 
@@ -214,7 +214,7 @@ Tips:
 | `--openai-rt-summary-model` | 要約モデル (Chat Completions) | `gpt-5.4-mini` | openai-realtime |
 | `--openai-rt-api-key` | API キー (デフォルト `OPENAI_API_KEY`) | — | openai-realtime |
 | `--gemini-rt-model` | Gemini Live モデル ID | `models/gemini-3.5-live-translate-preview` | gemini-realtime |
-| `--gemini-rt-debounce-ms` | 発話の切れ目検出 (debounce) | `800` | gemini-realtime |
+| `--gemini-rt-debounce-ms` | 発話の切れ目検出 (debounce) | `1200` | gemini-realtime |
 | `--gemini-rt-max-segment-seconds` | 連続発話の強制カット上限. `0` で無効 | `8.0` | gemini-realtime |
 | `--gemini-rt-summary-model` | 要約モデル | `gemini-3.1-flash-lite` | gemini-realtime |
 | `--gemini-rt-api-key` | API キー (デフォルト `GEMINI_API_KEY`) | — | gemini-realtime |
@@ -311,7 +311,8 @@ uv run realtime-interpreter --backend mlx --end-silence-ms 500 --max-segment-sec
 | debounce / end-silence | トレードオフ |
 |---|---|
 | 短い (200〜500ms) | レスポンス重視. ただし途中で commit して対応がズレる可能性 |
-| 800ms (デフォルト) | バランス. 通常の発話間ポーズで commit |
+| 800ms (openai-realtime / mlx / openai-chat のデフォルト) | バランス. 通常の発話間ポーズで commit |
+| 1200ms (gemini-realtime のデフォルト) | Gemini の翻訳バースト間ギャップを跨いで文単位に束ねる |
 | 長い (1500〜2500ms) | 段落単位で commit. 対応は確実だが表示は遅延 |
 
 ### その他のチューニング (ソース直書き)

@@ -252,6 +252,37 @@ def test_gemini_backend_event_handling_modern_transcription() -> None:
     assert backend._pending_turn.target() == "こんにちは世界"
 
 
+def test_gemini_debounce_default_is_1200ms() -> None:
+    """gemini の debounce 既定は 1200ms (翻訳バースト間ギャップ対策; 実ログ計測で決定).
+
+    CLI 定数とバックエンドのコンストラクタ既定が一致していることも保証する。
+    openai-realtime の 800ms とは独立 (混同して揃えられたら退行)。
+    """
+    import inspect
+
+    from realtime_interpreter.main import DEFAULT_GEMINI_DEBOUNCE_MS
+    from realtime_interpreter.backends.openai_realtime import TURN_DEBOUNCE_MS
+
+    assert DEFAULT_GEMINI_DEBOUNCE_MS == 1200
+    sig = inspect.signature(GeminiRealtimeBackend.__init__)
+    assert sig.parameters["turn_debounce_ms"].default == 1200
+    # openai-realtime は人間のポーズ統計基準のまま (別バックエンド別既定)
+    assert TURN_DEBOUNCE_MS == 800
+
+    # argparse 経由の実値も 1200 (add_argument にリテラルが直書きされたら検出)
+    import sys
+
+    from realtime_interpreter import main as m
+
+    argv_backup = sys.argv
+    try:
+        sys.argv = ["realtime-interpreter", "--backend", "gemini-realtime"]
+        args = m._parse_args()
+        assert args.gemini_debounce_ms == 1200
+    finally:
+        sys.argv = argv_backup
+
+
 def test_gemini_backend_debounce_commit() -> None:
     import time
     backend = GeminiRealtimeBackend(
