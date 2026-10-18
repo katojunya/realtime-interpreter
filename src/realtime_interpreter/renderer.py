@@ -157,7 +157,13 @@ class StreamingRenderer:
             # あるため、こちらで cell-aware に折り返して multi-line Text を渡す。
             # Rich はその multi-line をそのまま描画し追加の wrap はしない。
             # → Live の行数追跡も正確で、ターミナル末尾でも凍結しない。
-            max_width = self._console.size.width
+            #
+            # width-1 で折り返す理由: 端末幅「ちょうど」の行を描画すると、行末で
+            # カーソルが次行へ進む端末 (eager wrap) では Live 領域が Rich の行数勘定
+            # より物理 1 行多く消費され、リフレッシュ毎に先頭行の残骸が
+            # スクロールバックに取り残される (committed 行の先頭断片が改行なしで
+            # 複数回連結される表示崩れ)。全行を width-1 以下に抑えて構造的に回避する。
+            max_width = max(1, self._console.size.width - 1)
             if self._current_source:
                 items.extend(
                     _timestamped_wrapped_rows(
