@@ -5,6 +5,11 @@ delta を受け取って累積する。translation session には `*.completed` 
 **存在しない** ため、ターン終了は「一定時間 delta が来ないこと」を debounce で
 判定する (= 発話の切れ目).
 
+入力転写ストリームはサーバ側でエラー通知なしに沈黙することがある (ja 連続発話で
+顕著。翻訳 delta は正常継続)。session.update の再送で即時復活するため、
+「翻訳は流れているのに入力転写が一定時間止まった」ら再送するウォッチドッグを持つ
+(INPUT_TRANSCRIPT_STALL_SECONDS を参照)。
+
 エンドポイント: wss://api.openai.com/v1/realtime/translations?model=...
 価格 (2026-05 時点): gpt-realtime-translate $0.034/min + 入力転写 $0.017/min
 公式リファレンス:
@@ -73,6 +78,17 @@ TURN_DEBOUNCE_MS = 800
 # 強制 commit 時は EN/JA が若干ズレる可能性があるが、表示の可読性を優先.
 # 0 を指定すると無効 (debounce のみで commit).
 OPENAI_MAX_SEGMENT_SECONDS = 8.0
+
+# 入力転写 (session.input_transcript.delta) のウォッチドッグ.
+# ja 等の連続発話セッションで、サーバ側の入力転写ストリームがエラー通知なしに
+# 沈黙する事象がある (翻訳 delta は正常継続、無音を挟んでも復活しない)。
+# session.update を再送すると同一接続のまま即時復活することを実測で確認済み。
+# そこで「翻訳 delta は届いているのに入力転写 delta が一定時間来ない」を検知したら
+# session.update を再送して転写を蘇生する。沈黙中に話された source は遡って
+# 届かないため、検知しきい値ぶんの転写は失われる (翻訳には影響なし)。
+INPUT_TRANSCRIPT_STALL_SECONDS = 10.0
+# 再送の最小間隔. 蘇生しないケースでの連打を防ぐ。
+TRANSCRIPT_KICK_COOLDOWN_SECONDS = 10.0
 
 # 文末判定ヘルパは保持 (将来 sentence-level splitting を再有効化する場合の参考実装).
 # 現在は EN/JA の切れ目が一致しないため commit には使用しない。
@@ -271,6 +287,12 @@ class OpenAIRealtimeBackend:
         self._pending_lock = threading.Lock()
         self._pending_turn: _PendingTurn | None = None
 
+        # 入力転写ウォッチドッグ状態. recv スレッドが沈黙を検知して pending を立て、
+        # send_loop (単一送信スレッド) が session.update を再送する。
+        self._last_input_delta_at: float = 0.0
+        self._last_transcript_kick_at: float = 0.0
+        self._transcript_kick_pending = False
+
         self._stream = None
         self._ws = None  # type: ignore[assignment]
         self._send_thread: threading.Thread | None = None
@@ -440,6 +462,9 @@ class OpenAIRealtimeBackend:
         }
         assert self._ws is not None
         self._ws.send(json.dumps(msg))
+        # ウォッチドッグの計測を仕切り直す (接続直後/再接続直後/蘇生再送直後)。
+        self._last_input_delta_at = time.monotonic()
+        self._transcript_kick_pending = False
         logger.debug("session.update sent: %s", json.dumps(msg))
 
     def _open_audio_stream(self) -> None:
@@ -545,6 +570,8 @@ class OpenAIRealtimeBackend:
             # プロアクティブ再接続: 60分ハード制限の手前で自分から ws を閉じ、
             # recv_loop の再接続経路に乗せて切れ目なく新セッションへ張り替える。
             self._maybe_proactive_reconnect()
+            # 入力転写が沈黙していたら session.update を再送して蘇生する。
+            self._maybe_kick_transcription()
             try:
                 chunk = self._audio_queue.get(timeout=0.1)
             except queue.Empty:
@@ -722,6 +749,7 @@ class OpenAIRealtimeBackend:
         if "input_transcript.delta" in etype or "input_audio_transcription.delta" in etype:
             delta = event.get("delta", "")
             if delta:
+                self._last_input_delta_at = time.monotonic()
                 self._append_input(delta)
                 if self._state != BackendState.TRANSLATING:
                     self._state = BackendState.TRANSLATING
@@ -737,6 +765,7 @@ class OpenAIRealtimeBackend:
             delta = event.get("delta", "")
             if delta:
                 self._append_output(delta)
+                self._check_transcript_stall()
                 if self._state != BackendState.TRANSLATING:
                     self._state = BackendState.TRANSLATING
                     self._update_status_display()
@@ -760,6 +789,47 @@ class OpenAIRealtimeBackend:
         # session.created / session.updated / session.closed なども含めて
         # 未マッチのイベントは debug に payload と共に残す
         logger.debug("unhandled event type=%s payload=%s", etype, _summarize_event(event))
+
+    # ---------------- input-transcript watchdog ----------------
+
+    def _check_transcript_stall(self) -> None:
+        """翻訳 delta 受信時に入力転写の沈黙を検知し、session.update 再送を予約する.
+
+        recv スレッドから呼ばれる。「翻訳は流れているのに入力転写だけ止まっている」
+        状態がサーバ側の転写ストリーム沈黙の兆候 (無音なら翻訳 delta も来ないため、
+        発話中の沈黙だけを正しく検知できる)。送信は send_loop に委ねる。
+        """
+        if self._transcript_kick_pending:
+            return
+        now = time.monotonic()
+        if now - self._last_input_delta_at < INPUT_TRANSCRIPT_STALL_SECONDS:
+            return
+        if now - self._last_transcript_kick_at < TRANSCRIPT_KICK_COOLDOWN_SECONDS:
+            return
+        logger.info(
+            "input transcript stalled (no delta for %.1fs while translation flows); "
+            "scheduling session.update re-send",
+            now - self._last_input_delta_at,
+        )
+        self._last_transcript_kick_at = now
+        self._transcript_kick_pending = True
+
+    def _maybe_kick_transcription(self) -> None:
+        """予約済みの蘇生用 session.update を再送する (send_loop スレッド専用).
+
+        websocket-client の send はスレッド安全でないため、音声送信と同じ
+        スレッドからのみ送る。再接続中は不要 (再接続経路が config を送り直し、
+        その時点で pending もクリアされる)。
+        """
+        if not self._transcript_kick_pending or self._reconnecting.is_set():
+            return
+        try:
+            self._send_session_config()  # 成功時に pending をクリアし計測を仕切り直す
+            logger.info("session.update re-sent to revive input transcription")
+        except Exception:
+            # 切断由来の失敗なら recv_loop の再接続経路が config を再送する。
+            logger.debug("transcript kick send failed", exc_info=True)
+            self._transcript_kick_pending = False
 
     # ---------------- pending turn management ----------------
 
