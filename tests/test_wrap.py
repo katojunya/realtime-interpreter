@@ -74,3 +74,29 @@ def test_long_ascii_word_hard_wrap() -> None:
     rows = wrapped.split("\n")
     for row in rows:
         assert len(row) <= 10
+
+
+def test_render_rows_never_fill_terminal_width() -> None:
+    """進行中表示の各行は端末幅「ちょうど」にならない (width-1 以下).
+
+    幅ちょうどの行は eager wrap な端末で Live の行数勘定を物理 1 行分狂わせ、
+    リフレッシュ毎に先頭行の残骸が積み残される (committed 行の先頭 110 セルが
+    改行なしで複数回連結される表示崩れ)。_render は全行を width-1 以下に抑える。
+    """
+    from rich.cells import cell_len
+    from rich.console import Console
+
+    from realtime_interpreter.renderer import StreamingRenderer
+
+    r = StreamingRenderer()
+    r._console = Console(width=110)
+    r._current_ts = "09:37"
+    # prefix "[09:37] " (8 セル) + 102 セルで全体がちょうど 110 セルになる入力。
+    # 旧実装 (max_width=width) では 1 行 110 セルのままになっていた。
+    r._current_source = "x" * 102
+    r._current_target = "あ" * 51  # 全角 51 文字 = 102 セル
+    group = r._render()
+    rows = [line for item in group.renderables for line in item.plain.split("\n")]
+    assert rows, "render produced no rows"
+    for row in rows:
+        assert cell_len(row) <= 109
